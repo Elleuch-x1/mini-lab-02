@@ -1,0 +1,23 @@
+# secrets / identity — never commit
+vpn/*.key
+vpn/*.pub
+vpn/*.conf
+.labkeep/
+secrets/
+
+# terraform
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+*.auto.tfvars
+terraform.tfvars
+crash.log
+
+# generated inventory / live IPs
+config/inventory/hosts.ini
+config/inventory/.ips.json
+
+# misc
+*.log
+.DS_Store
