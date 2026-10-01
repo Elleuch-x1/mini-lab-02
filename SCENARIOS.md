@@ -12,6 +12,8 @@ built-in blue-team track. Mapped to the **OWASP CI/CD Top-10**.
 > backend-creds state reads, generic writable-state poisoning, unpinned **module** poisoning,
 > Vault AppRole over-broad path, moto "cloud" backdoor, Argo hostPath→node-escape.
 
+## Status: ✅ COMPLETE — all 26 scenarios + 4 chains + 6 blue-team implemented & validated (see VALIDATION.md / SOLUTIONS.md).
+
 ## Counts
 - **26 attack scenarios** (all distinct from the mini-lab), across 7 tracks
 - **4 flagship cross-domain chains** (compose the atomic scenarios)

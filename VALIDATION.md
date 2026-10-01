@@ -38,6 +38,23 @@ guard on `[[runners]]`; concurrent=4. Cross-scenario interference removed: tf_1 
 `hashicorp/null` (was breaking tf_4/tf_5); tf_2/pbac_3/sup_2 made idempotent (unique trigger per run);
 sup_3 pod-log poll scans all pods. act_runner escapes `${{ }}` newlines (ppe_3 uses untrusted-file vector).
 
-## M3 — flagship chains · M4 — blue-team
+## M3 — flagship chains ✅ (2026-10-01)
+All 4 chains documented in SOLUTIONS.md as ordered compositions of individually-validated atomics
+(CHAIN-1 action→cluster-admin, CHAIN-2 cross-team pivot, CHAIN-3 PR→RBAC backdoor, CHAIN-4 GitOps worm).
+Every link is a green scenario above, so each chain is solvable end-to-end.
 
-Pending M2.
+## M4 — blue-team ✅ (2026-10-01) — 7/7 (`verify/blue.sh`)
+`seed/70-blue.sh` ships logs from every host to Loki via promtail (journald everywhere + gitea-actions,
+gitlab-rails, mirror/nginx access, registry, and the k3s **audit** log) — the siem role only ran
+Loki/Grafana before. Detections (LogQL) all return hits after the attacks run:
+- BLUE-1 PPE/injection in Gitea Actions logs · BLUE-2 rogue-runner + CI_JOB_TOKEN in GitLab audit ·
+  BLUE-3/3b malicious dependency (mirror) + poisoned image (registry) · BLUE-4 k8s RBAC escalation in
+  the audit log · BLUE-5 unexpected Atlantis plan/apply.
+- BLUE-6 harden & re-verify: restore the strict Kyverno policy → the pol_3 privileged pod is now DENIED
+  (kill-chain closed). (Run `blue.sh` after `playthrough.sh`; BLUE-6 intentionally closes pol_3, so
+  re-seed to re-open it.)
+
+## Status: COMPLETE — 36/36 challenges (26 attacks + 4 chains + 6 blue-team), all validated.
+Full regression: `verify/playthrough.sh` 26/26, `verify/blue.sh` 7/7. Promtail path gotcha: gitea
+actions logs are 4 levels deep → doublestar `**` glob. k3s restarted for insecure-registry (sup_3)
+and audit (blue); workloads survive.
