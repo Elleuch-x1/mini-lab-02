@@ -242,6 +242,53 @@ sc_pbac_4(){
   [ -n "$tok" ] && on "$HOST_RUNNER" "printf 'GITEA_BOT_TOKEN=%s\n' '$tok' > /opt/ci-bot.env; chmod 644 /opt/ci-bot.env"
 }
 
+# ========================= Pipeline execution & injection (PPE-*) =================
+
+# ---- PPE-1: expression injection — untrusted commit message flows into a run: step -----
+# gap: a workflow interpolates ${{ github.event.head_commit.message }} straight into a shell run:.
+sc_ppe_1(){
+  say "PPE-1 expression injection (commit message -> run:)"
+  on "$HOST_RUNNER" "echo '$(flag ppe_1-expression-injection)' > /opt/minilab2/ppe1-flag.txt; chmod 644 /opt/minilab2/ppe1-flag.txt"
+  local W; W=$(mktemp -d)
+  if gclone_alpha app "$W/app"; then ( cd "$W/app"; mkdir -p .gitea/workflows
+    cat > .gitea/workflows/ppe1.yml <<'YML'
+name: ppe1-triage
+on: [push]
+jobs:
+  announce:
+    runs-on: ubuntu-latest
+    steps:
+      - name: announce the commit
+        run: echo "New build -> ${{ github.event.head_commit.message }}"
+YML
+    gc add -A && gc commit -q -m "add triage workflow" && gc push -q origin main 2>/dev/null ); fi; rm -rf "$W"
+}
+
+# ---- PPE-3: workflow-command injection — untrusted config file poisons $GITHUB_ENV -------
+# gap: a "load build config" step pipes a repo-controlled file straight into $GITHUB_ENV; whoever
+# can edit that file defines an extra variable ($DEPLOY_CMD) that a later deploy step feeds to bash -c.
+sc_ppe_3(){
+  say "PPE-3 workflow-command injection (untrusted file -> \$GITHUB_ENV -> later step)"
+  on "$HOST_RUNNER" "echo '$(flag ppe_3-github-env-injection)' > /opt/minilab2/ppe3-flag.txt; chmod 644 /opt/minilab2/ppe3-flag.txt"
+  local W; W=$(mktemp -d)
+  if gclone_alpha app "$W/app"; then ( cd "$W/app"; mkdir -p .gitea/workflows ci
+    printf 'APP_VERSION=1.0\n' > ci/release.env
+    cat > .gitea/workflows/ppe3.yml <<'YML'
+name: ppe3-deploy
+on: [push]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: load build config into env
+        run: cat ci/release.env >> "$GITHUB_ENV"
+      - name: run configured deploy
+        run: bash -c "${DEPLOY_CMD:-echo 'no deploy configured'}"
+YML
+    gc add -A && gc commit -q -m "add deploy workflow + release config" && gc push -q origin main 2>/dev/null ); fi; rm -rf "$W"
+}
+
 # ---- dispatcher ----
 ALL="ppe_1 ppe_2 ppe_3 pbac_1 pbac_2 pbac_3 pbac_4 sup_1 sup_2 sup_3 sup_4 sec_1 sec_2 \
      k8s_1 k8s_2 k8s_3 k8s_4 tf_1 tf_2 tf_3 tf_4 tf_5 tf_6 pol_1 pol_2 pol_3"
