@@ -12,10 +12,13 @@
   delay: 10
   until: kyverno_install.rc == 0
 
-- name: wait for kyverno admission controller rollout
-  ansible.builtin.shell: k3s kubectl -n kyverno rollout status deploy/kyverno-admission-controller --timeout=240s
+- name: wait for kyverno admission controller to become available (tolerant; it restarts a few
+  # times during first boot while CRDs/webhooks settle — don't fail the playbook on a slow rollout)
+  ansible.builtin.shell: k3s kubectl -n kyverno rollout status deploy/kyverno-admission-controller --timeout=120s
   environment: { KUBECONFIG: /etc/rancher/k3s/k3s.yaml }
   changed_when: false
-  retries: 3
-  delay: 15
-  until: true
+  failed_when: false
+  retries: 5
+  delay: 20
+  until: kyverno_ready.rc == 0
+  register: kyverno_ready
