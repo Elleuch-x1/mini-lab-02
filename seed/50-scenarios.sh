@@ -14,6 +14,43 @@ gclone_alpha(){ git clone -q "http://$ADMIN_USER:$ADMIN_PASS@gitea:3000/alpha/$1
 # (added one track at a time; see SCENARIOS.md for the catalog)
 #   PPE-*, PBAC-*, SUP-*, SEC-*, K8S-*, TF-*, POL-*
 
+# ---- TF-3: cross-team remote state exfil (alpha pipeline reaches beta's state) ----
+sc_tf_3(){
+  say "TF-3 cross-team remote state"
+  # a juicy flag in beta's state
+  on "$HOST_MINIO" "mc alias set local http://127.0.0.1:9000 '$MINIO_USER' '$MINIO_PASS' >/dev/null 2>&1; \
+    printf '{\"version\":4,\"terraform_version\":\"1.9.8\",\"serial\":2,\"lineage\":\"beta-state\",\"outputs\":{\"db_password\":{\"value\":\"%s\",\"type\":\"string\",\"sensitive\":true}},\"resources\":[]}' '$(flag tf_3-cross-team-state)' > /tmp/bst.json; \
+    mc cp /tmp/bst.json local/tf-state-beta/prod/terraform.tfstate >/dev/null 2>&1; rm -f /tmp/bst.json"
+  # leaked beta key reachable from the alpha apply host (the cross-team cred the attacker obtains)
+  on "$HOST_TFEXEC" "install -d -m700 -o deployer -g deployer /home/deployer/.beta 2>/dev/null; \
+    printf 'AWS_ACCESS_KEY_ID=beta-ci\nAWS_SECRET_ACCESS_KEY=beta-St4te-2026!\n' > /home/deployer/.beta/creds; \
+    chown deployer:deployer /home/deployer/.beta/creds; chmod 600 /home/deployer/.beta/creds"
+}
+
+# ---- TF-5: transitive module exec (trusted module -> submodule with a provisioner) ----
+sc_tf_5(){
+  say "TF-5 transitive module exec"
+  on "$HOST_TFEXEC" "echo '$(flag tf_5-transitive-module)' > /home/deployer/tf5-flag.txt; chown deployer:deployer /home/deployer/tf5-flag.txt; chmod 600 /home/deployer/tf5-flag.txt"
+  local W; W=$(mktemp -d); if gclone_alpha tf-modules "$W/r"; then ( cd "$W/r"; mkdir -p note/inner
+    grep -q 'module "inner"' note/main.tf 2>/dev/null || printf '\nmodule "inner" { source = "./inner" }\n' >> note/main.tf
+    cat > note/inner/main.tf <<'TF'
+resource "null_resource" "x" {
+  provisioner "local-exec" { command = "cat /home/deployer/tf5-flag.txt > /tmp/tf5-proof 2>/dev/null" }
+}
+TF
+    gc add -A && gc commit -q -m "note: use inner helper module" && gc push -q origin main 2>/dev/null ); fi; rm -rf "$W"
+}
+
+# ---- TF-6: over-privileged apply identity -> provisions a privileged k8s RBAC binding ----
+sc_tf_6(){
+  say "TF-6 over-priv apply identity -> k8s RBAC backdoor"
+  # the apply identity holds a cluster-admin kubeconfig (over-privileged) on the atlantis host
+  local kc; kc=$(on "$HOST_K8S" "cat /etc/rancher/k3s/k3s.yaml" 2>/dev/null | sed 's#https://127.0.0.1:6443#https://k8s:6443#')
+  on "$HOST_TFEXEC" "install -d -m700 -o deployer -g deployer /home/deployer/.kube 2>/dev/null; cat > /home/deployer/.kube/config; chown deployer:deployer /home/deployer/.kube/config; chmod 600 /home/deployer/.kube/config" <<<"$kc"
+  # a cluster-admin-only crown-jewel secret the backdoor grants access to
+  on "$HOST_K8S" "k3s kubectl -n kube-system create secret generic crown --from-literal=flag='$(flag tf_6-k8s-rbac-backdoor)' --dry-run=client -o yaml | k3s kubectl apply -f - >/dev/null 2>&1"
+}
+
 # ---- TF-4: writable state + scheduled apply (deployer) -> poisoned module executes ----
 sc_tf_4(){
   say "TF-4 writable state + scheduled apply (deployer identity)"
