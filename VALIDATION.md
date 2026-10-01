@@ -75,8 +75,16 @@ commit-message newline→`$GITHUB_ENV` vector is neutralized — ppe_3 uses the 
 package ships a default config.toml, so `[[runners]]` was never written and GitLab pipelines sat `pending`
 forever — now guarded on the `[[runners]]` block; CI pipelines run to success.
 
+### Access control (PBAC) + Supply chain (SUP, partial) ✅ (2026-10-01)
+PBAC 4/4: pbac_1 CI_JOB_TOKEN cross-project (inbound allowlist), pbac_2 rogue runner (leaked token →
+env-dumping pre_build_script steals a victim job's secret while legit runners are paused), pbac_3
+branch-protection bypass → protected release secret, pbac_4 over-scoped token.
+SUP (so far): sup_1 action pinned by mutable ref → re-point a public marketplace action → RCE;
+sup_4 dependency confusion → CI pulls the attacker's higher version off the internal mirror → RCE.
+All via `verify/playthrough.sh`. (sup_2/sup_3, sec_*, tf_2, pol_1/2 still pending.)
+
 ### Remaining tracks (in progress)
-**Done: 14/26** — tf_1/3/4/5/6, k8s_1/2/3/4, pol_3, pbac_4, ppe_1/2/3. Next: pbac_1/2/3, sup (4), sec (2), tf_2, pol_1/2.
+**Done: 19/26** — + pbac_1/2/3, sup_1, sup_4. Next: sup_2/3, sec_1/2, tf_2, pol_1/2.
 
 
 ## M3 — flagship chains · M4 — blue-team

