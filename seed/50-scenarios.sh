@@ -378,6 +378,45 @@ YML
     gc add -A && gc commit -q -m "install internal deps in CI" && gc push -q origin main 2>/dev/null ); fi; rm -rf "$W"
 }
 
+# ---- SUP-2: artifact poisoning / Zip-Slip — vulnerable extraction escapes the dir ------
+# gap: a deploy job extracts an upstream artifact with python tarfile.extractall (fully-trusted),
+# so a `../` member overwrites a trusted script the same job then runs (with a secret in scope).
+sc_sup_2(){
+  say "SUP-2 artifact poisoning / Zip-Slip"
+  local GL=http://gitlab PAT=glpat-minilab2automation01 GID PID BR
+  GID=$(curl -s -H "PRIVATE-TOKEN: $PAT" "$GL/api/v4/groups?search=beta" | jq -r '.[0].id' 2>/dev/null)
+  PID=$(curl -s -H "PRIVATE-TOKEN: $PAT" "$GL/api/v4/projects?search=dashboard" | jq -r '.[0].id' 2>/dev/null)
+  if [ -z "$PID" ] || [ "$PID" = null ]; then
+    PID=$(curl -s -H "PRIVATE-TOKEN: $PAT" -X POST "$GL/api/v4/projects" -d name=dashboard -d path=dashboard \
+      -d namespace_id="$GID" -d visibility=private -d initialize_with_readme=true | jq -r '.id' 2>/dev/null)
+  fi
+  # unprotected secret in the deploy job's scope
+  curl -s -H "PRIVATE-TOKEN: $PAT" -X DELETE "$GL/api/v4/projects/$PID/variables/SUP2_SECRET" >/dev/null 2>&1
+  curl -s -H "PRIVATE-TOKEN: $PAT" -X POST "$GL/api/v4/projects/$PID/variables" \
+    -d "key=SUP2_SECRET" --data-urlencode "value=$(flag sup_2-zip-slip-artifact)" -d protected=false -d masked=false >/dev/null 2>&1
+  # seed the repo: benign release.sh + benign artifact + vulnerable deploy pipeline
+  local W; W=$(mktemp -d)
+  if git clone -q "http://oauth2:$PAT@gitlab.minilab2.lab/beta/dashboard.git" "$W/d" 2>/dev/null; then ( cd "$W/d"
+    mkdir -p scripts incoming
+    printf '#!/bin/sh\necho "release: nothing to do"\n' > scripts/release.sh
+    python3 - <<'PY'
+import tarfile,io
+t=tarfile.open('incoming/update.tar','w')
+data=b'hello from upstream\n'; ti=tarfile.TarInfo('note.txt'); ti.size=len(data)
+t.addfile(ti, io.BytesIO(data)); t.close()
+PY
+    cat > .gitlab-ci.yml <<'YML'
+deploy:
+  tags: [shell]
+  script:
+    - rm -f /tmp/sup2-proof
+    - mkdir -p extracted
+    - python3 -c "import tarfile; tarfile.open('incoming/update.tar').extractall('extracted')"
+    - sh scripts/release.sh
+YML
+    gc add -A && gc commit -q -m "deploy pipeline (extract upstream artifact)" && gc push -q origin main 2>/dev/null ); fi; rm -rf "$W"
+}
+
 # ========================= Pipeline execution & injection (PPE-*) =================
 
 # ---- PPE-1: expression injection — untrusted commit message flows into a run: step -----

