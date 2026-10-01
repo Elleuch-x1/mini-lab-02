@@ -13,7 +13,7 @@ for b in jq git curl openssl; do command -v "$b" >/dev/null 2>&1 || need="$need 
 chmod 600 "$OPKEY" 2>/dev/null || true
 
 # ordered sections; a failure in one does not abort the rest (we want maximum seed).
-SECTIONS=(10-gitea 20-minio 30-vault 40-argo 60-k8s 90-decoys)
+SECTIONS=(10-gitea 15-gitlab 20-minio 30-vault 60-k8s 40-argo 90-decoys)
 declare -A RESULT
 for s in "${SECTIONS[@]}"; do
   say "=== $s ==="
