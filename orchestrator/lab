@@ -144,6 +144,17 @@ cmd_status(){
 # scenarios but does not revert artifacts from a previously-higher profile; for a clean downgrade
 # use `lab down` then `lab up --profile <x>`.
 cmd_reset(){ "$ROOT/orchestrator/configure.sh" "$PROFILE" || die "reset needs the config layer"; }
+# verify = push the harnesses to the edge and exploit every enabled scenario (red); with --blue also
+# run the detection/hardening exercises. Proves the kill-chains fire end-to-end.
+cmd_verify(){
+  local edge; edge="$(tf output -raw edge_public_ip 2>/dev/null)"; [ -n "$edge" ] || die "not deployed (run 'lab up')"
+  local SSH="ssh -i $VPN/op.key -o StrictHostKeyChecking=no -o ConnectTimeout=15"
+  $SSH root@"$edge" 'mkdir -p /opt/minilab2/verify' 2>/dev/null
+  scp -q -i "$VPN/op.key" -o StrictHostKeyChecking=no "$ROOT/verify/playthrough.sh" "$ROOT/verify/blue.sh" root@"$edge":/opt/minilab2/verify/ 2>/dev/null
+  $SSH root@"$edge" 'bash /opt/minilab2/verify/playthrough.sh'
+  [ "${RUN_BLUE:-0}" = 1 ] && $SSH root@"$edge" 'bash /opt/minilab2/verify/blue.sh'
+  return 0
+}
 cmd_snapshot(){ log "snapshot: TODO — DO snapshots of all droplets"; }
 cmd_restore(){ log "restore: TODO — rebuild from golden snapshots"; }
 cmd_ssh(){ "$ROOT/orchestrator/opssh.sh" "$@"; }
@@ -153,11 +164,12 @@ SUB="${1:-help}"; shift || true
 while [ $# -gt 0 ]; do case "$1" in
   --profile) PROFILE="$2"; shift 2;;
   --provider) PROVIDER="$2"; shift 2;;
+  --blue) RUN_BLUE=1; shift;;
   *) break;;
 esac; done
 
 case "$SUB" in
-  up) cmd_up;; down) cmd_down;; status) cmd_status;; reset) cmd_reset;;
+  up) cmd_up;; down) cmd_down;; status) cmd_status;; reset) cmd_reset;; verify) cmd_verify;;
   vpn) cmd_vpn;; snapshot) cmd_snapshot;; restore) cmd_restore;; ssh) cmd_ssh "$@";;
   *) grep -E '^#( |   )' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
 esac
