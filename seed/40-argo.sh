@@ -26,13 +26,30 @@ YML"
 
 on $H "$K get ns alpha >/dev/null 2>&1 || $K create ns alpha >/dev/null
 cat <<'YML' | $K apply -f -
+# hardened baseline: a RESTRICTED AppProject — alpha may deploy only namespaced workloads into
+# ns alpha; NO cluster-scoped resources, NO other namespaces. K8S-1 widens this to enable escape.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: alpha
+  namespace: argocd
+spec:
+  sourceRepos: ['$REPO']
+  destinations:
+    - { server: https://kubernetes.default.svc, namespace: alpha }
+  clusterResourceWhitelist: []
+  namespaceResourceWhitelist:
+    - { group: 'apps', kind: Deployment }
+    - { group: '',     kind: Service }
+    - { group: '',     kind: ConfigMap }
+---
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
   name: alpha-app
   namespace: argocd
 spec:
-  project: default
+  project: alpha
   source:
     repoURL: $REPO
     targetRevision: main

@@ -74,6 +74,42 @@ chmod +x /usr/local/bin/iac-apply.sh; chown deployer:deployer /usr/local/bin/iac
   on "$HOST_TFEXEC" "( crontab -u deployer -l 2>/dev/null | grep -v iac-apply; echo '*/10 * * * * /usr/local/bin/iac-apply.sh' ) | crontab -u deployer -"
 }
 
+# ========================= GitOps / Kubernetes track (K8S-*) =====================
+
+# ---- K8S-1: ArgoCD AppProject escape -> deploy into a restricted namespace -------------
+# baseline (40-argo) pins alpha to a RESTRICTED project (ns alpha only, no cluster/other-ns).
+# the gap widens that project so a committed manifest can escape into ns platform.
+sc_k8s_1(){
+  say "K8S-1 ArgoCD AppProject escape"
+  on "$HOST_K8S" "k3s kubectl -n platform create secret generic crown --from-literal=flag='$(flag k8s_1-argo-project-escape)' --dry-run=client -o yaml | k3s kubectl apply -f - >/dev/null 2>&1
+cat <<'YML' | k3s kubectl apply -f - >/dev/null 2>&1
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata: { name: alpha, namespace: argocd }
+spec:
+  sourceRepos: ['*']
+  destinations: [{ server: 'https://kubernetes.default.svc', namespace: '*' }]
+  clusterResourceWhitelist: [{ group: '*', kind: '*' }]
+  namespaceResourceWhitelist: [{ group: '*', kind: '*' }]
+YML"
+}
+
+# ---- K8S-2: k8s RBAC escalation from a pipeline ServiceAccount -------------------------
+# gap: an over-privileged SA (cluster-admin) is parked in a team namespace; the team's least-priv
+# `create pods` right lets it launch a pod *as* that SA -> assumes cluster-admin -> cross-team secret.
+sc_k8s_2(){
+  say "K8S-2 pipeline-SA RBAC escalation"
+  on "$HOST_K8S" "k3s kubectl -n beta create secret generic rbac-crown --from-literal=flag='$(flag k8s_2-rbac-escalation)' --dry-run=client -o yaml | k3s kubectl apply -f - >/dev/null 2>&1
+k3s kubectl -n alpha create sa alpha-deploy --dry-run=client -o yaml | k3s kubectl apply -f - >/dev/null 2>&1
+cat <<'YML' | k3s kubectl apply -f - >/dev/null 2>&1
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: { name: alpha-deploy-admin }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: cluster-admin }
+subjects: [{ kind: ServiceAccount, name: alpha-deploy, namespace: alpha }]
+YML"
+}
+
 # ---- dispatcher ----
 ALL="ppe_1 ppe_2 ppe_3 pbac_1 pbac_2 pbac_3 pbac_4 sup_1 sup_2 sup_3 sup_4 sec_1 sec_2 \
      k8s_1 k8s_2 k8s_3 k8s_4 tf_1 tf_2 tf_3 tf_4 tf_5 tf_6 pol_1 pol_2 pol_3"

