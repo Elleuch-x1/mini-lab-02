@@ -306,6 +306,25 @@ sc_pbac_3(){
     -d "name=main" -d "push_access_level=30" -d "merge_access_level=30" >/dev/null 2>&1
 }
 
+# ========================= Secrets & identity pivots (SEC-*) ======================
+
+# ---- SEC-2: Vault kubernetes-auth over-broad role (any pod SA -> another team's secret) --
+sc_sec_2(){
+  say "SEC-2 Vault kubernetes-auth over-broad role"
+  on "$HOST_VAULT" "export VAULT_ADDR=http://127.0.0.1:8200; export VAULT_TOKEN=\$(jq -r .root_token /etc/vault.d/init.json); vault kv put secret/beta/crown flag='$(flag sec_2-vault-k8s-overbroad)' >/dev/null 2>&1"
+  on "$HOST_K8S" "k3s kubectl -n kube-system create sa vault-reviewer --dry-run=client -o yaml | k3s kubectl apply -f - >/dev/null 2>&1
+k3s kubectl create clusterrolebinding vault-reviewer --clusterrole=system:auth-delegator --serviceaccount=kube-system:vault-reviewer --dry-run=client -o yaml | k3s kubectl apply -f - >/dev/null 2>&1"
+  local RJWT CAB64
+  RJWT=$(on "$HOST_K8S" "k3s kubectl -n kube-system create token vault-reviewer --duration=8760h 2>/dev/null")
+  CAB64=$(on "$HOST_K8S" "base64 -w0 /var/lib/rancher/k3s/server/tls/server-ca.crt 2>/dev/null")
+  on "$HOST_VAULT" "export VAULT_ADDR=http://127.0.0.1:8200; export VAULT_TOKEN=\$(jq -r .root_token /etc/vault.d/init.json)
+vault auth list 2>/dev/null | grep -q '^kubernetes/' || vault auth enable kubernetes >/dev/null 2>&1
+echo '$CAB64' | base64 -d > /tmp/k8sca.crt
+vault write auth/kubernetes/config kubernetes_host=https://k8s:6443 kubernetes_ca_cert=@/tmp/k8sca.crt token_reviewer_jwt='$RJWT' >/dev/null 2>&1
+vault write auth/kubernetes/role/overbroad bound_service_account_names='*' bound_service_account_namespaces='*' token_policies=beta-read ttl=1h >/dev/null 2>&1
+rm -f /tmp/k8sca.crt"
+}
+
 # ========================= Supply chain (SUP-*) ===================================
 
 # ---- SUP-1: 3rd-party CI action pinned by TAG (not SHA) -> re-tag attack -> RCE ---------
