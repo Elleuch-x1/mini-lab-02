@@ -457,6 +457,20 @@ EOF
   else no pbac_2 "no leaked token on runner"; fi
 fi
 
+echo "### Policy-as-code bypass ###"
+
+# --- pol_1: conftest coverage gap -> malicious (uncovered) resource passes the gate ----
+if enabled pol_1; then
+  out=$(on atlantis 'cd /opt/pol1 && conftest test --policy policy main.tf >/dev/null 2>&1 && cat /opt/minilab2/pol1-flag.txt')
+  chk pol_1 pol_1-conftest-coverage-gap "$out"
+fi
+
+# --- pol_2: tfsec soft-fail / inline-ignore -> the gate passes a vulnerable config ----
+if enabled pol_2; then
+  out=$(on atlantis 'cd /opt/pol2 && tfsec . --soft-fail --no-color >/dev/null 2>&1 && cat /opt/minilab2/pol2-flag.txt')
+  chk pol_2 pol_2-tfsec-skip-comment "$out"
+fi
+
 echo "### Secrets & identity pivots ###"
 
 # --- sec_2: a pod SA token authenticates to Vault (over-broad role) -> reads beta's secret ----

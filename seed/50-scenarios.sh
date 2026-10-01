@@ -216,6 +216,66 @@ spec:
 YML"
 }
 
+# ---- POL-1: OPA/Conftest coverage gap — policy misses a resource type ------------------
+sc_pol_1(){
+  say "POL-1 OPA/Conftest coverage gap"
+  on "$HOST_ATLANTIS" "echo '$(flag pol_1-conftest-coverage-gap)' > /opt/minilab2/pol1-flag.txt; chmod 644 /opt/minilab2/pol1-flag.txt"
+  on "$HOST_ATLANTIS" "bash -s" <<'EOF'
+set -e
+command -v conftest >/dev/null 2>&1 || { cd /tmp; wget -q https://github.com/open-policy-agent/conftest/releases/download/v0.56.0/conftest_0.56.0_Linux_x86_64.tar.gz -O c.tgz && tar xzf c.tgz conftest && install -m755 conftest /usr/local/bin/ && rm -f c.tgz conftest; }
+install -d -m755 /opt/pol1/policy
+cat > /opt/pol1/policy/s3.rego <<'REGO'
+package main
+deny[msg] {
+  input.resource.aws_s3_bucket[name].acl == "public-read"
+  msg := sprintf("public S3 bucket: %s", [name])
+}
+REGO
+# malicious config uses a resource TYPE the policy never checks -> ships past the gate
+cat > /opt/pol1/main.tf <<'TF'
+resource "kubernetes_cluster_role_binding" "admin" {
+  metadata {
+    name = "ci-admin"
+  }
+  role_ref {
+    kind      = "ClusterRole"
+    name      = "cluster-admin"
+    api_group = "rbac.authorization.k8s.io"
+  }
+  subject {
+    kind      = "ServiceAccount"
+    name      = "ci"
+    namespace = "alpha"
+  }
+}
+TF
+EOF
+}
+
+# ---- POL-2: tfsec inline-ignore / soft-fail abuse -------------------------------------
+sc_pol_2(){
+  say "POL-2 tfsec skip-comment / soft-fail abuse"
+  on "$HOST_ATLANTIS" "echo '$(flag pol_2-tfsec-skip-comment)' > /opt/minilab2/pol2-flag.txt; chmod 644 /opt/minilab2/pol2-flag.txt"
+  on "$HOST_ATLANTIS" "bash -s" <<'EOF'
+set -e
+command -v tfsec >/dev/null 2>&1 || { wget -q https://github.com/aquasecurity/tfsec/releases/download/v1.28.11/tfsec-linux-amd64 -O /usr/local/bin/tfsec && chmod 755 /usr/local/bin/tfsec; }
+install -d -m755 /opt/pol2
+cat > /opt/pol2/main.tf <<'TF'
+resource "aws_security_group" "open" {
+  name        = "open"
+  description = "ingress"
+  ingress {
+    description = "all"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"] #tfsec:ignore:aws-ec2-no-public-ingress-sgr
+  }
+}
+TF
+EOF
+}
+
 # ---- PBAC-4: over-scoped token -> cross-team repo read (blast radius) -------------------
 # gap: a CI bot token is a member of a team it shouldn't be (platform) and is leaked onto the
 # shared runner; it reads another team's private repo / secrets.
