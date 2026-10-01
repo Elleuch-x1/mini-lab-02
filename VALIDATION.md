@@ -19,9 +19,26 @@ gitlab-rails call. All prior mini-lab fixes carried over (MinIO-from-source, clo
 reserved-IP via doctl, atlantis/gitea config, etc.).
 
 ## M2 — scenarios (in progress)
-Each of the 26 scenarios is implemented as a hardened⇄vulnerable toggle and verified by an actual
-exploit playthrough (static + dynamic harnesses), per the mini-lab standard. Status: framework +
-`tf_4` landed; remainder in progress.
+Each scenario is a hardened⇄vulnerable toggle verified by an **actual exploit playthrough**
+(`verify/playthrough.sh`, run on the edge over the VPC), per the mini-lab standard.
+
+### Terraform / IaC track ✅ (2026-10-01) — 4/4 captured
+`verify/playthrough.sh` → **tf_3, tf_4, tf_5, tf_6 all PASS**:
+- **tf_3** cross-team remote-state exfil: foothold on alpha's apply host (atlantis) loots a leaked
+  beta cloud key → reads team **beta's** MinIO-backed state → `MINILAB{tf_3-cross-team-state}`.
+- **tf_4** writable auto-applied IaC + scheduled apply: attacker with SCM write poisons `alpha/infra`;
+  the cron drift-apply (`iac-apply.sh`) runs it as the privileged **deployer** → `MINILAB{tf_4-state-poisoning}`.
+- **tf_5** transitive module exec: the "trusted" `alpha/tf-modules//note` now sources a nested module
+  whose `local-exec` fires on apply → `MINILAB{tf_5-transitive-module}`.
+- **tf_6** over-privileged apply identity: the apply host holds a **cluster-admin kubeconfig**; its client
+  cert reads a `kube-system` crown secret via the k8s API → `MINILAB{tf_6-k8s-rbac-backdoor}`.
+
+Harness notes: nested ssh→su quoting is handled via a base64 `rsx` helper; tf_4 uses a `timestamp()`
+trigger so the kill-chain re-fires on every run (repeatable). All four re-run green.
+
+### Remaining tracks (in progress)
+ppe (3), pbac (4), sup (4), sec (2), k8s (4), tf_1/tf_2, pol (3) — implemented + validated per track.
+
 
 ## M3 — flagship chains · M4 — blue-team
 Pending M2.
