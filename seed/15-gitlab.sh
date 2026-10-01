@@ -6,11 +6,11 @@ H="$HOST_GITLAB"
 GLURL="http://gitlab.${LABDOMAIN:-minilab2.lab}"
 PAT=glpat-minilab2automation01
 
-# admin PAT (fixed, idempotent) + users, via gitlab-rails on the gitlab host
-on "$H" "gitlab-rails runner \"u=User.find_by_username('root'); t=u.personal_access_tokens.find_or_initialize_by(name:'automation'); t.scopes=['api']; t.expires_at=365.days.from_now; t.set_token('$PAT'); t.save!\" >/dev/null 2>&1"
-for u in carol dave; do
-  on "$H" "gitlab-rails runner \"u=User.find_by_username('$u') || User.new; u.username='$u'; u.name='$u'; u.email='$u@minilab2.lab'; u.password='Dev-$u-2026!'; u.password_confirmation='Dev-$u-2026!'; u.confirmed_at=Time.now; u.skip_confirmation!; u.save!\" >/dev/null 2>&1"
-done
+# admin PAT (fixed) + users in ONE gitlab-rails call (Rails startup is ~90s; don't pay it 3x)
+on "$H" "gitlab-rails runner \"
+  r=User.find_by_username('root'); t=r.personal_access_tokens.find_or_initialize_by(name:'automation'); t.scopes=['api']; t.expires_at=365.days.from_now; t.set_token('$PAT'); t.save!;
+  ['carol','dave'].each { |n| u=User.find_by_username(n) || User.new; u.username=n; u.name=n; u.email=\\\"#{n}@minilab2.lab\\\"; u.password='Dev-'+n+'-2026!'; u.password_confirmation='Dev-'+n+'-2026!'; u.skip_confirmation!; u.save! }
+\" >/dev/null 2>&1"
 
 gl(){ curl -sS -H "PRIVATE-TOKEN: $PAT" "$@"; }
 # group beta + projects
