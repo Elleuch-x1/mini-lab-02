@@ -263,6 +263,33 @@ sc_pbac_1(){
     -d "target_project_id=$SPID" >/dev/null 2>&1
 }
 
+# ---- PBAC-2: rogue runner registration (leaked token) -> intercept another job's secret --
+# gap: a runner-registration-capable token is leaked on the shared host. A rogue runner with an
+# env-dumping pre_build_script can be registered to run a victim job and steal its CI secret.
+sc_pbac_2(){
+  say "PBAC-2 rogue runner registration (leaked token)"
+  local GL=http://gitlab PAT=glpat-minilab2automation01 GID PID BR
+  GID=$(curl -s -H "PRIVATE-TOKEN: $PAT" "$GL/api/v4/groups?search=beta" | jq -r '.[0].id' 2>/dev/null)
+  PID=$(curl -s -H "PRIVATE-TOKEN: $PAT" "$GL/api/v4/projects?search=payments" | jq -r '.[0].id' 2>/dev/null)
+  if [ -z "$PID" ] || [ "$PID" = null ]; then
+    PID=$(curl -s -H "PRIVATE-TOKEN: $PAT" -X POST "$GL/api/v4/projects" -d name=payments -d path=payments \
+      -d namespace_id="$GID" -d visibility=private -d initialize_with_readme=true | jq -r '.id' 2>/dev/null)
+  fi
+  BR=$(curl -s -H "PRIVATE-TOKEN: $PAT" "$GL/api/v4/projects/$PID" | jq -r '.default_branch // "main"')
+  local CI='build:
+  tags: [shell]
+  script: ["echo building payments", "date"]'
+  curl -s -H "PRIVATE-TOKEN: $PAT" -X POST "$GL/api/v4/projects/$PID/repository/files/.gitlab-ci.yml" \
+    --data-urlencode "branch=$BR" --data-urlencode "content=$CI" --data-urlencode "commit_message=ci" >/dev/null 2>&1 \
+  || curl -s -H "PRIVATE-TOKEN: $PAT" -X PUT "$GL/api/v4/projects/$PID/repository/files/.gitlab-ci.yml" \
+    --data-urlencode "branch=$BR" --data-urlencode "content=$CI" --data-urlencode "commit_message=ci" >/dev/null 2>&1
+  curl -s -H "PRIVATE-TOKEN: $PAT" -X DELETE "$GL/api/v4/projects/$PID/variables/VICTIM_SECRET" >/dev/null 2>&1
+  curl -s -H "PRIVATE-TOKEN: $PAT" -X POST "$GL/api/v4/projects/$PID/variables" \
+    -d "key=VICTIM_SECRET" --data-urlencode "value=$(flag pbac_2-rogue-runner)" -d protected=false -d masked=false >/dev/null 2>&1
+  # LEAK a runner-registration-capable token on the shared runner host (low-trust)
+  on "$HOST_RUNNER" "printf 'GITLAB_PAT=%s\n' '$PAT' > /opt/leaked-gitlab.pat; chmod 644 /opt/leaked-gitlab.pat"
+}
+
 # ---- PBAC-3: branch-protection bypass -> protected release secret -----------------------
 sc_pbac_3(){
   say "PBAC-3 branch-protection bypass -> protected release secret"
