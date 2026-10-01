@@ -557,6 +557,26 @@ sc_ppe_2(){
     -d "protected=false" -d "masked=false" >/dev/null 2>&1
 }
 
+# ---- TF-2: Atlantis repo-level atlantis.yaml custom workflow run: -> arbitrary commands ----
+# gap: the server allows repo-level custom workflows; a PR's atlantis.yaml runs arbitrary run: steps
+# as the apply identity at plan time.
+sc_tf_2(){
+  say "TF-2 atlantis.yaml custom workflow run: -> RCE"
+  on "$HOST_ATLANTIS" "echo '$(flag tf_2-atlantis-custom-workflow)' > /opt/minilab2/tf2-flag.txt; chmod 644 /opt/minilab2/tf2-flag.txt"
+  on "$HOST_ATLANTIS" "bash -s" <<'EOF'
+set -e
+grep -q ATLANTIS_REPO_CONFIG_JSON /etc/atlantis/atlantis.env || \
+  echo 'ATLANTIS_REPO_CONFIG_JSON={"repos":[{"id":"/.*/","allow_custom_workflows":true,"allowed_overrides":["workflow","apply_requirements"]}]}' >> /etc/atlantis/atlantis.env
+systemctl restart atlantis
+EOF
+  # wire the gitea->atlantis webhook on alpha/infra so a PR auto-plans
+  local WHS; WHS=$(on "$HOST_ATLANTIS" "cat /etc/atlantis/webhook.secret 2>/dev/null")
+  # drop any stale hook, then (re)create
+  for hid in $(gitea_api GET /repos/alpha/infra/hooks | jq -r '.[].id' 2>/dev/null); do
+    gitea_api DELETE "/repos/alpha/infra/hooks/$hid" >/dev/null 2>&1; done
+  gitea_api POST /repos/alpha/infra/hooks -d "{\"type\":\"gitea\",\"active\":true,\"events\":[\"pull_request\",\"issue_comment\"],\"config\":{\"url\":\"http://atlantis:4141/events\",\"content_type\":\"json\",\"secret\":\"$WHS\"}}" >/dev/null 2>&1
+}
+
 # ---- dispatcher ----
 ALL="ppe_1 ppe_2 ppe_3 pbac_1 pbac_2 pbac_3 pbac_4 sup_1 sup_2 sup_3 sup_4 sec_1 sec_2 \
      k8s_1 k8s_2 k8s_3 k8s_4 tf_1 tf_2 tf_3 tf_4 tf_5 tf_6 pol_1 pol_2 pol_3"
