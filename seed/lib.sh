@@ -27,6 +27,7 @@ HOST_TFEXEC=atlantis
 HOST_REGISTRY=registry
 HOST_K8S=k8s
 HOST_SIEM=siem
+HOST_RUNNER=runner
 
 say(){ printf '\033[1;35m[seed]\033[0m %s\n' "$*"; }
 on(){ host="$1"; shift; $SSHO root@"$host" "$@"; }   # run a command on a lab host via op key

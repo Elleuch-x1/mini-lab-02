@@ -51,8 +51,16 @@ Harness notes: in-cluster attacker identities use short-lived SA tokens; GitOps 
 (Argo refresh / Flux reconcile annotations) then poll the escaped Job's logs; Argo API login needs
 `Content-Type: application/json`.
 
+### IaC / policy / access-control (first slice) ✅ (2026-10-01) — 3/3 captured
+- **tf_1** malicious provider via `.terraformrc` redirect: a `dev_overrides` entry points the null
+  provider at an attacker dir; `terraform plan` launches that binary → RCE → `MINILAB{tf_1-malicious-provider}`.
+- **pol_3** Kyverno admission bypass: the enforce policy is re-applied with a namespace **exclusion**,
+  so a privileged hostPath pod in ns alpha is admitted → reads a node-only flag → `MINILAB{pol_3-kyverno-admission-bypass}`.
+- **pbac_4** over-scoped token: a CI bot token (member of a team it shouldn't be) leaks onto the shared
+  runner → clones another team's private repo → `MINILAB{pbac_4-overscoped-token}`.
+
 ### Remaining tracks (in progress)
-**Done: TF (tf_3/4/5/6) + k8s (k8s_1/2/3/4) = 8/26.** Next: ppe (3), pbac (4), sup (4), sec (2), tf_1/tf_2, pol (3).
+**Done: 11/26** — tf_1/3/4/5/6, k8s_1/2/3/4, pol_3, pbac_4. Next: ppe (3), pbac_1/2/3, sup (4), sec (2), tf_2, pol_1/2.
 
 
 ## M3 — flagship chains · M4 — blue-team

