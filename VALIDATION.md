@@ -36,8 +36,23 @@ Each scenario is a hardened⇄vulnerable toggle verified by an **actual exploit 
 Harness notes: nested ssh→su quoting is handled via a base64 `rsx` helper; tf_4 uses a `timestamp()`
 trigger so the kill-chain re-fires on every run (repeatable). All four re-run green.
 
+### GitOps / Kubernetes track ✅ (2026-10-01) — 4/4 captured
+`verify/playthrough.sh` → **k8s_1, k8s_2, k8s_3, k8s_4 all PASS**:
+- **k8s_1** ArgoCD AppProject escape: baseline pins alpha to a restricted project; the gap widens it so
+  a committed Job escapes into the **platform** namespace and reads its crown secret → `MINILAB{k8s_1-argo-project-escape}`.
+- **k8s_2** pipeline-SA RBAC escalation: least-priv `alpha-ci` (create pods) launches a pod *as* a parked
+  cluster-admin SA → reads team **beta's** secret → `MINILAB{k8s_2-rbac-escalation}`.
+- **k8s_3** Flux controller abuse: a Flux Kustomization watches an attacker-writable Git path; the
+  cluster-admin kustomize-controller applies a Job into platform → `MINILAB{k8s_3-flux-controller-rce}`.
+- **k8s_4** weak ArgoCD admin on the exposed NodePort API: login `admin:admin123` → create+sync an app
+  that deploys into the restricted platform namespace → `MINILAB{k8s_4-argocd-weak-admin}`.
+
+Harness notes: in-cluster attacker identities use short-lived SA tokens; GitOps kill-chains force-sync
+(Argo refresh / Flux reconcile annotations) then poll the escaped Job's logs; Argo API login needs
+`Content-Type: application/json`.
+
 ### Remaining tracks (in progress)
-ppe (3), pbac (4), sup (4), sec (2), k8s (4), tf_1/tf_2, pol (3) — implemented + validated per track.
+**Done: TF (tf_3/4/5/6) + k8s (k8s_1/2/3/4) = 8/26.** Next: ppe (3), pbac (4), sup (4), sec (2), tf_1/tf_2, pol (3).
 
 
 ## M3 — flagship chains · M4 — blue-team

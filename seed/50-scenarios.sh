@@ -110,6 +110,52 @@ subjects: [{ kind: ServiceAccount, name: alpha-deploy, namespace: alpha }]
 YML"
 }
 
+# ---- K8S-3: Flux Kustomization + cluster-admin kustomize-controller reconciling attacker Git ----
+# gap: a Flux Kustomization watches an attacker-writable repo path (alpha/infra//fleet); the
+# cluster-admin kustomize-controller applies whatever is committed there -> deploy anywhere.
+sc_k8s_3(){
+  say "K8S-3 Flux controller abuse (kustomize-controller is cluster-admin)"
+  local GIP; GIP=$(getent hosts gitea | awk '{print $1}' | head -1)
+  on "$HOST_K8S" "k3s kubectl -n platform create secret generic flux-crown --from-literal=flag='$(flag k8s_3-flux-controller-rce)' --dry-run=client -o yaml | k3s kubectl apply -f - >/dev/null 2>&1
+cat <<YML | k3s kubectl apply -f - >/dev/null 2>&1
+apiVersion: v1
+kind: Secret
+metadata: { name: fleet-auth, namespace: flux-system }
+stringData: { username: '$ADMIN_USER', password: '$ADMIN_PASS' }
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata: { name: fleet, namespace: flux-system }
+spec:
+  interval: 1m
+  url: http://$GIP:3000/alpha/infra.git
+  ref: { branch: main }
+  secretRef: { name: fleet-auth }
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata: { name: fleet, namespace: flux-system }
+spec:
+  interval: 1m
+  timeout: 2m
+  sourceRef: { kind: GitRepository, name: fleet }
+  path: ./fleet
+  prune: true
+YML"
+}
+
+# ---- K8S-4: exposed ArgoCD API + weak admin password -> sync arbitrary manifests -------
+# gap: the admin password is reset to a trivially-guessable value on the NodePort-exposed API.
+sc_k8s_4(){
+  say "K8S-4 weak ArgoCD admin on exposed API"
+  on "$HOST_K8S" "k3s kubectl -n platform create secret generic crown4 --from-literal=flag='$(flag k8s_4-argocd-weak-admin)' --dry-run=client -o yaml | k3s kubectl apply -f - >/dev/null 2>&1"
+  local PWHASH MTIME PWB64 MTB64
+  PWHASH='$2b$10$Q0M/pCmyT7ol6zlKvb5ycubipnLHaioMSUqHGxR7F6ENQk0vTsyf.'   # bcrypt("admin123")
+  MTIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  PWB64=$(printf '%s' "$PWHASH" | base64 -w0); MTB64=$(printf '%s' "$MTIME" | base64 -w0)
+  on "$HOST_K8S" "k3s kubectl -n argocd patch secret argocd-secret --type merge -p '{\"data\":{\"admin.password\":\"$PWB64\",\"admin.passwordMtime\":\"$MTB64\"}}' >/dev/null 2>&1; k3s kubectl -n argocd rollout restart deploy argocd-server >/dev/null 2>&1"
+}
+
 # ---- dispatcher ----
 ALL="ppe_1 ppe_2 ppe_3 pbac_1 pbac_2 pbac_3 pbac_4 sup_1 sup_2 sup_3 sup_4 sec_1 sec_2 \
      k8s_1 k8s_2 k8s_3 k8s_4 tf_1 tf_2 tf_3 tf_4 tf_5 tf_6 pol_1 pol_2 pol_3"
