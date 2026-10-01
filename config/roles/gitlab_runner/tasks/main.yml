@@ -1,0 +1,50 @@
+---
+# GitLab Runner — shell executor (HOST mode, no Docker). Uses the modern runner-token API flow.
+- name: add gitlab-runner apt repo (once)
+  ansible.builtin.shell: curl -sL https://packages.gitlab.com/install/repositories/runner/gitlab-runner/script.deb.sh | bash
+  args: { creates: /etc/apt/sources.list.d/runner_gitlab-runner.list }
+
+- name: install gitlab-runner + build tools
+  ansible.builtin.apt: { name: [gitlab-runner, git, curl, jq], state: present, update_cache: true }
+
+# --- get an admin PAT from gitlab (fixed value, idempotent), on the gitlab host ---
+- name: create/ensure admin PAT on gitlab (fixed value, idempotent)
+  ansible.builtin.command:
+    cmd: >
+      gitlab-rails runner "u=User.find_by_username('root');
+      t=u.personal_access_tokens.find_or_initialize_by(name:'automation');
+      t.scopes=['api']; t.expires_at=365.days.from_now;
+      t.set_token('glpat-driftwoodautomation01'); t.save!; puts t.token"
+  delegate_to: "{{ groups['gitlab'][0] }}"
+  register: glpat
+  changed_when: false
+
+- name: create an instance runner via API -> authentication token
+  ansible.builtin.uri:
+    url: "http://gitlab.{{ lab_domain }}/api/v4/user/runners"
+    method: POST
+    headers: { PRIVATE-TOKEN: "glpat-driftwoodautomation01" }
+    body_format: form-urlencoded
+    body:
+      runner_type: instance_type
+      description: "runner-shared (shell)"
+      tag_list: "shell,host"
+      run_untagged: "true"
+    status_code: [201]
+  register: gl_runner
+  retries: 5
+  delay: 10
+  until: gl_runner.status is defined and gl_runner.status == 201
+
+- name: register gitlab-runner (shell executor)
+  ansible.builtin.command:
+    cmd: >
+      gitlab-runner register --non-interactive
+      --url http://gitlab.{{ lab_domain }}
+      --token {{ gl_runner.json.token }}
+      --executor shell --description runner-shared
+    creates: /etc/gitlab-runner/config.toml
+  register: gl_reg
+
+- name: enable + start gitlab-runner
+  ansible.builtin.systemd: { name: gitlab-runner, enabled: true, state: started }

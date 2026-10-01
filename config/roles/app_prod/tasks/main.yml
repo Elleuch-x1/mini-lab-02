@@ -1,0 +1,49 @@
+---
+# app-prod — the internal "crown jewel": a small web app + PostgreSQL. Hardened baseline (M1).
+- name: postgresql + nginx
+  ansible.builtin.apt:
+    name: [postgresql, postgresql-contrib, nginx, python3-psycopg2, acl]
+    state: present
+    update_cache: true
+
+- name: ensure postgres running
+  ansible.builtin.systemd: { name: postgresql, enabled: true, state: started }
+
+- name: app db role
+  community.postgresql.postgresql_user:
+    name: appuser
+    password: "{{ seed.postgres_pass }}"
+  become: true
+  become_user: postgres
+
+- name: app database
+  community.postgresql.postgresql_db:
+    name: appdb
+    owner: appuser
+  become: true
+  become_user: postgres
+
+- name: seed a customers table + a row (realistic data)
+  community.postgresql.postgresql_query:
+    db: appdb
+    login_user: appuser
+    login_password: "{{ seed.postgres_pass }}"
+    login_host: 127.0.0.1
+    query: |
+      CREATE TABLE IF NOT EXISTS customers (id serial primary key, name text, plan text);
+      INSERT INTO customers (name, plan) SELECT 'Globex Corp','enterprise'
+        WHERE NOT EXISTS (SELECT 1 FROM customers);
+  become: true
+  become_user: postgres
+
+- name: internal app page
+  ansible.builtin.copy:
+    dest: /var/www/html/index.html
+    content: |
+      <!doctype html><title>Vultara — internal app</title>
+      <h1>Vultara Billing (internal)</h1>
+      <p>Environment: production. Access restricted to internal network.</p>
+  notify: reload nginx
+
+- name: nginx up
+  ansible.builtin.systemd: { name: nginx, enabled: true, state: started }

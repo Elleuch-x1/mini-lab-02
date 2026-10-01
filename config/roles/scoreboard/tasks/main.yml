@@ -1,0 +1,15 @@
+---
+# scoreboard — simple flag/welcome page on the edge (player entrypoint). Flags wired in M2+.
+- name: nginx
+  ansible.builtin.apt: { name: nginx, state: present, update_cache: true }
+- name: scoreboard page
+  ansible.builtin.copy:
+    dest: /var/www/html/index.html
+    content: |
+      <!doctype html><title>DRIFTWOOD</title>
+      <h1>DRIFTWOOD — CI/CD & IaC Pro-Lab</h1>
+      <p>You're connected over WireGuard. Enumerate the estate and begin.</p>
+      <p>Milestone: {{ milestone | default(1) }} (1 = base/template; attack content arrives in later milestones)</p>
+  notify: reload nginx
+- name: nginx up
+  ansible.builtin.systemd: { name: nginx, enabled: true, state: started }

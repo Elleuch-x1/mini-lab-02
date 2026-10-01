@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# lab — on-demand orchestrator for the mini-lab (CI/CD + Terraform attack lab).
+# Start/destroy on demand; the SAME WireGuard creds + endpoint IP persist across cycles.
+#   lab up [--profile trainer|realistic|insane] [--provider do|proxmox]
+#   lab down                 # destroy droplets (stop cost); keep reserved IP + WG identity
+#   lab status               # per-service health check over the VPC
+#   lab reset                # fast re-seed (no full destroy)
+#   lab vpn                  # print your WireGuard client config
+#   lab ssh <host>           # operator SSH into a lab host
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+INFRA="$ROOT/infra"
+VPN="$ROOT/vpn"
+STATEKEEP="$ROOT/.labkeep"        # survives `down` — gitignored
+PROVIDER="${LAB_PROVIDER:-do}"
+PROFILE="${LAB_PROFILE:-realistic}"   # trainer | realistic | insane  (difficulty preset)
+
+log(){ printf '\033[1;36m[lab]\033[0m %s\n' "$*"; }
+die(){ printf '\033[1;31m[lab:err]\033[0m %s\n' "$*" >&2; exit 1; }
+need(){ command -v "$1" >/dev/null 2>&1 || die "missing dependency: $1"; }
+
+admin_cidrs(){
+  # Terraform list literal of CIDRs allowed to reach WG+SSH on the public host.
+  # = the box running this orchestrator (auto-detected) + optional PLAYER_IP.
+  local box list=""
+  box="$(curl -fsS https://api.ipify.org 2>/dev/null || true)"
+  [ -n "$box" ] && list="\"${box}/32\""
+  if [ -n "${PLAYER_IP:-}" ]; then
+    [ -n "$list" ] && list="$list,"
+    list="$list\"${PLAYER_IP%/*}/32\""
+  fi
+  [ -n "$list" ] || die "no admin IP; set PLAYER_IP=x.x.x.x"
+  echo "[$list]"
+}
+
+ensure_wg_keys(){
+  mkdir -p "$VPN"
+  if [ ! -f "$VPN/server.key" ]; then
+    need wg
+    log "generating persistent WireGuard keys (one-time)"
+    umask 077
+    wg genkey | tee "$VPN/server.key" | wg pubkey > "$VPN/server.pub"
+    wg genkey | tee "$VPN/client.key" | wg pubkey > "$VPN/client.pub"
+    log "WG keys stored in vpn/ (gitignored) — these persist across up/down"
+  fi
+  if [ ! -f "$VPN/op.key" ]; then
+    log "generating persistent operator SSH key (one-time)"
+    ssh-keygen -t ed25519 -N "" -C "minilab-op" -f "$VPN/op.key" >/dev/null
+    [ -f "$VPN/op.pub" ] || cp "$VPN/op.key.pub" "$VPN/op.pub"
+  fi
+}
+
+tf(){ terraform -chdir="$INFRA/$PROVIDER" "$@"; }
+tfkeep(){ terraform -chdir="$INFRA/$PROVIDER/keep" "$@"; }
+
+ensure_token(){
+  if [ -z "${TF_VAR_do_token:-}" ]; then
+    local t; t="$(grep -oE 'access-token: *[a-zA-Z0-9_-]+' "$HOME/.config/doctl/config.yaml" 2>/dev/null | head -1 | awk '{print $2}')"
+    [ -n "$t" ] || die "set TF_VAR_do_token (or authenticate doctl)"
+    export TF_VAR_do_token="$t"
+  fi
+}
+
+load_keep(){
+  tfkeep init -input=false >/dev/null
+  tfkeep apply -input=false -auto-approve >/dev/null
+  KEEP_VPC="$(tfkeep output -raw vpc_id)"
+  KEEP_RIP="$(tfkeep output -raw reserved_ip)"
+}
+
+cmd_up(){
+  need terraform; need curl; ensure_token; ensure_wg_keys
+  mkdir -p "$STATEKEEP"
+  case "$PROFILE" in trainer|realistic|insane) ;; *) die "profile must be trainer|realistic|insane";; esac
+  local acidrs; acidrs="$(admin_cidrs)"
+  log "provider=$PROVIDER profile=$PROFILE admin_cidrs=$acidrs"
+  log "ensuring persistent keep (VPC + reserved IP)"
+  load_keep
+  log "keep: vpc=$KEEP_VPC reserved_ip=$KEEP_RIP"
+  tf init -input=false >/dev/null
+  tf apply -input=false -auto-approve \
+    -var "admin_cidrs=$acidrs" \
+    -var "vpc_id=$KEEP_VPC" \
+    -var "reserved_ip=$KEEP_RIP" \
+    -var "wg_server_privkey=$(cat "$VPN/server.key")" \
+    -var "wg_client_pubkey=$(cat "$VPN/client.pub")"
+  # assign the reserved IP to scm-ci via doctl (TF's assignment resource is flaky; this is idempotent)
+  if command -v doctl >/dev/null 2>&1; then
+    local sid; sid="$(doctl compute droplet list --tag-name minilab2 --format Name,ID --no-header 2>/dev/null | awk '$1=="edge"{print $2}')"
+    if [ -n "$sid" ]; then
+      log "assigning reserved IP $KEEP_RIP -> edge (droplet $sid)"
+      doctl compute reserved-ip-action assign "$KEEP_RIP" "$sid" >/dev/null 2>&1 || true
+    fi
+  fi
+  "$ROOT/orchestrator/configure.sh" "$PROFILE" || log "configure step failed (see output)"
+  cmd_vpn
+  log "lab is up (profile=$PROFILE). 'lab vpn' prints your client config; 'lab status' shows services."
+}
+
+cmd_down(){
+  need terraform; ensure_token
+  log "destroying droplets ONLY (keep module: VPC + reserved IP + WG identity are preserved)"
+  load_keep
+  tf destroy -input=false -auto-approve \
+    -var "admin_cidrs=$(admin_cidrs)" \
+    -var "vpc_id=$KEEP_VPC" -var "reserved_ip=$KEEP_RIP" \
+    -var "wg_server_privkey=$(cat "$VPN/server.key" 2>/dev/null || echo x)" \
+    -var "wg_client_pubkey=$(cat "$VPN/client.pub" 2>/dev/null || echo x)" \
+    || true
+  log "down complete. reserved IP + WG creds kept; 'lab up' rebuilds with the SAME VPN endpoint."
+}
+
+cmd_vpn(){
+  [ -f "$VPN/client.key" ] || die "no WG client key yet — run 'lab up' first"
+  local endpoint; endpoint="$(tfkeep output -raw reserved_ip 2>/dev/null || tf output -raw vpn_endpoint 2>/dev/null || echo '<reserved-ip-after-up>')"
+  local serverpub; serverpub="$(cat "$VPN/server.pub" 2>/dev/null || echo '<server-pub>')"
+  cat <<EOF
+# ---- WireGuard client config (save as minilab2.conf; same every time) ----
+[Interface]
+PrivateKey = $(cat "$VPN/client.key")
+Address = 10.97.0.2/32
+
+[Peer]
+PublicKey = $serverpub
+Endpoint = ${endpoint}:51820
+AllowedIPs = 10.88.0.0/16, 10.97.0.0/24   # VPC (all 5 segments) + the tunnel net
+PersistentKeepalive = 25
+EOF
+}
+
+cmd_status(){
+  tf output 2>/dev/null || { log "not deployed (run 'lab up')"; return 0; }
+  local edge; edge="$(tf output -raw edge_public_ip 2>/dev/null)"
+  [ -n "$edge" ] || return 0
+  log "service health (probed from edge over the VPC)"
+  local SSH="ssh -i $VPN/op.key -o StrictHostKeyChecking=no -o ConnectTimeout=10"
+  scp -q -i "$VPN/op.key" -o StrictHostKeyChecking=no "$ROOT/seed/healthcheck.sh" "$ROOT/seed/lib.sh" root@"$edge":/opt/minilab2/seed/ 2>/dev/null || true
+  $SSH root@"$edge" 'bash /opt/minilab2/seed/healthcheck.sh' || log "some services unhealthy (see above)"
+}
+
+# reset = re-run config (rewrites enabled_scenarios for the chosen profile) + re-seed. Use this to
+# CHANGE difficulty on a running lab. NOTE: the seed is additive — it enables the new profile's
+# scenarios but does not revert artifacts from a previously-higher profile; for a clean downgrade
+# use `lab down` then `lab up --profile <x>`.
+cmd_reset(){ "$ROOT/orchestrator/configure.sh" "$PROFILE" || die "reset needs the config layer"; }
+cmd_snapshot(){ log "snapshot: TODO — DO snapshots of all droplets"; }
+cmd_restore(){ log "restore: TODO — rebuild from golden snapshots"; }
+cmd_ssh(){ "$ROOT/orchestrator/opssh.sh" "$@"; }
+
+# ---- arg parse ----
+SUB="${1:-help}"; shift || true
+while [ $# -gt 0 ]; do case "$1" in
+  --profile) PROFILE="$2"; shift 2;;
+  --provider) PROVIDER="$2"; shift 2;;
+  *) break;;
+esac; done
+
+case "$SUB" in
+  up) cmd_up;; down) cmd_down;; status) cmd_status;; reset) cmd_reset;;
+  vpn) cmd_vpn;; snapshot) cmd_snapshot;; restore) cmd_restore;; ssh) cmd_ssh "$@";;
+  *) grep -E '^#( |   )' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+esac

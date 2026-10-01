@@ -1,0 +1,46 @@
+---
+# Base config for every lab host. Hardened, boring, realistic.
+- name: Set hostname
+  ansible.builtin.hostname:
+    name: "{{ inventory_hostname }}"
+
+- name: Base packages
+  ansible.builtin.apt:
+    name: [curl, wget, jq, git, unzip, ca-certificates, gnupg, python3, acl, vim, net-tools, dnsutils]
+    state: present
+    update_cache: true
+  register: apt_base
+  retries: 3
+  delay: 5
+  until: apt_base is succeeded
+
+- name: /etc/hosts entries — hosts + service aliases (internal name resolution)
+  ansible.builtin.blockinfile:
+    path: /etc/hosts
+    marker: "# {mark} MINILAB2 HOSTS"
+    block: |
+      {% for h in groups['all'] | sort %}
+      {{ hostvars[h]['ansible_host'] | default(hostvars[h]['ansible_default_ipv4']['address']) }} {{ h }} {{ h }}.{{ lab_domain }}
+      {% endfor %}
+      {% for alias, grp in service_hosts.items() %}
+      {% if groups.get(grp) %}
+      {{ hostvars[groups[grp][0]]['ansible_host'] | default(hostvars[groups[grp][0]]['ansible_default_ipv4']['address']) }} {{ alias }} {{ alias }}.{{ lab_domain }}
+      {% endif %}
+      {% endfor %}
+
+- name: minilab state dir
+  ansible.builtin.file: { path: /opt/minilab2, state: directory, mode: "0755" }
+
+- name: record active profile + enabled scenarios (consumed by the seed layer)
+  ansible.builtin.copy:
+    dest: "{{ item.dest }}"
+    content: "{{ item.content }}"
+    mode: "0644"
+  loop:
+    - { dest: /opt/minilab2/profile, content: "{{ profile }}\n" }
+    - { dest: /opt/minilab2/enabled_scenarios, content: "{{ (enabled_scenarios | default([])) | join('\n') }}\n" }
+
+- name: MOTD
+  ansible.builtin.copy:
+    dest: /etc/motd
+    content: "minilab2 host [{{ inventory_hostname }}] — segment {{ lookup('ansible.builtin.file', '/opt/minilab2/segment', errors='ignore') | default('?') }}\n"

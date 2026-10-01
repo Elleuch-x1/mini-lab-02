@@ -1,0 +1,39 @@
+---
+# provider_mirror — internal Terraform provider network-mirror + static host (on state-backend).
+# Serves :8080 so tf-exec needs no internet at play time. Content populated in M1.3 (offline prep).
+- name: nginx
+  ansible.builtin.apt: { name: nginx, state: present }
+
+- name: mirror webroots
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: www-data
+    group: www-data
+    mode: "0755"
+  loop: [/var/www/providers, /var/www/modules]
+
+- name: nginx vhost :8080 (autoindex mirror)
+  ansible.builtin.copy:
+    dest: /etc/nginx/sites-available/mirror.conf
+    content: |
+      server {
+        listen 8080 default_server;
+        server_name _;
+        location / { root /var/www; autoindex on; }
+      }
+  notify: reload nginx
+
+- name: enable vhost
+  ansible.builtin.file:
+    src: /etc/nginx/sites-available/mirror.conf
+    dest: /etc/nginx/sites-enabled/mirror.conf
+    state: link
+  notify: reload nginx
+
+- name: disable default vhost
+  ansible.builtin.file: { path: /etc/nginx/sites-enabled/default, state: absent }
+  notify: reload nginx
+
+- name: enable + start nginx
+  ansible.builtin.systemd: { name: nginx, enabled: true, state: started }

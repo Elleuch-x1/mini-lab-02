@@ -1,0 +1,61 @@
+---
+# Shared mini-lab-02 variables. INTENTIONAL LAB CREDENTIALS for a private, VPN-gated estate.
+# Harder sibling of the mini-lab: multi-team, real enforcement. Baseline mostly-hardened; attacks toggled.
+lab_domain: "minilab2.lab"
+
+# ---- difficulty system (profile passed via -e profile=trainer|realistic|insane) ----
+profile: "realistic"
+scenarios: {}            # per-scenario override, e.g. {ppe_1: true}
+
+# scenario IDs (see SCENARIOS.md): ppe_1..3, pbac_1..4, sup_1..4, sec_1..2,
+#   k8s_1..4, tf_1..6, pol_1..3  (26 total). Presets filled in during M2.
+profile_presets:
+  trainer: []     # all implemented scenarios (populated as M2 lands them)
+  realistic: []   # curated subset + decoys
+  insane: []      # only the flagship-chain scenarios
+
+# ---- service versions (pinned) ---------------------------------------------
+versions:
+  gitea: "1.22.3"
+  act_runner: "0.2.11"
+  atlantis: "0.28.5"
+  vault: "1.17.6"
+  terraform: "1.9.8"
+  opentofu: "1.8.3"
+  k3s: "v1.30.5+k3s1"
+  argocd: "v2.12.4"
+  minio: "latest"
+  go: "1.23.2"
+  mc_release: "RELEASE.2025-08-13T08-35-41Z"
+  registry: "2.8.3"
+  flux: "2.3.0"
+  kyverno: "v1.12.5"
+  loki: "3.1.1"
+
+# ---- service -> inventory group (common role writes /etc/hosts aliases) ----
+service_hosts:
+  gitea: gitea
+  gitlab: gitlab
+  atlantis: atlantis
+  minio: minio
+  vault: vault
+  registry: registry
+  mirror: provider_mirror
+  argocd: argocd
+  app: app_prod
+  tf: tf_exec
+  grafana: siem
+  loki: siem
+
+# ---- lab credentials (seed; intentional) -----------------------------------
+seed:
+  admin_user: "svc-admin"
+  admin_pass: "Min2lab-Adm!n-2026"
+  gitea_admin_token_name: "orchestrator"
+  minio_root_user: "minioadmin"
+  minio_root_pass: "Min2lab-M!nio-2026"
+  vault_dev: false
+  postgres_pass: "Min2lab-Pg-2026"
+
+# ---- teams (multi-team segmentation) ----
+teams: [alpha, beta]

@@ -1,0 +1,43 @@
+---
+# GitLab CE (omnibus) — native, trimmed for an 8GB host, hardened baseline (signup off, root seeded).
+- name: deps
+  ansible.builtin.apt: { name: [curl, ca-certificates, perl, postfix, tzdata], state: present, update_cache: true }
+  environment: { DEBIAN_FRONTEND: noninteractive }
+
+- name: add gitlab-ce apt repo (once)
+  ansible.builtin.shell: curl -sS https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.deb.sh | bash
+  args: { creates: /etc/apt/sources.list.d/gitlab_gitlab-ce.list }
+
+# NOTE: no EXTERNAL_URL here on purpose — with it set and no /etc/gitlab/gitlab.rb yet,
+# omnibus auto-reconfigures at package-install time and seeds a RANDOM root password,
+# which makes initial_root_password below a no-op. We bootstrap explicitly instead.
+- name: install gitlab-ce (large download; may take a few minutes)
+  ansible.builtin.apt: { name: gitlab-ce, state: present, update_cache: true }
+
+- name: gitlab.rb (trimmed + hardened + seeded root)
+  ansible.builtin.copy:
+    dest: /etc/gitlab/gitlab.rb
+    mode: "0600"
+    content: |
+      external_url 'http://gitlab.{{ lab_domain }}'
+      nginx['listen_port'] = 80
+      nginx['listen_https'] = false
+      # trim for 8GB
+      puma['worker_processes'] = 2
+      sidekiq['max_concurrency'] = 9
+      prometheus_monitoring['enable'] = false
+      grafana['enable'] = false
+      gitlab_rails['gitlab_default_can_create_group'] = true
+      # hardened: no open signup; seed root password on first reconfigure
+      gitlab_rails['gitlab_signup_enabled'] = false
+      gitlab_rails['initial_root_password'] = '{{ seed.admin_pass }}'
+  notify: gitlab reconfigure
+
+- name: reconfigure now if never done (slow)
+  ansible.builtin.command: gitlab-ctl reconfigure
+  args: { creates: /var/opt/gitlab/bootstrapped }
+  register: glr
+  changed_when: glr.rc == 0
+
+- name: wait for gitlab http
+  ansible.builtin.wait_for: { port: 80, host: 127.0.0.1, timeout: 300 }

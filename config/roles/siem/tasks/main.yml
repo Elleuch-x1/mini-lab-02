@@ -1,0 +1,86 @@
+---
+# Blue-team SIEM — Loki (log store) + Grafana (viewer), native. M1 = up & healthy;
+# M4 wires promtail shippers from every host + detection dashboards.
+- name: deps
+  ansible.builtin.apt: { name: [unzip, curl, apt-transport-https, software-properties-common], state: present, update_cache: true }
+
+# --- Loki (native binary) ---
+- name: loki user + dir
+  ansible.builtin.user: { name: loki, system: true, shell: /sbin/nologin, home: /var/lib/loki, create_home: true }
+- ansible.builtin.file: { path: /var/lib/loki, state: directory, owner: loki, group: loki, mode: "0750" }
+
+- name: download loki {{ versions.loki }}
+  ansible.builtin.unarchive:
+    src: "https://github.com/grafana/loki/releases/download/v{{ versions.loki }}/loki-linux-amd64.zip"
+    dest: /usr/local/bin
+    remote_src: true
+    creates: /usr/local/bin/loki-linux-amd64
+  register: loki_dl
+  retries: 3
+  delay: 5
+  until: loki_dl is succeeded
+- ansible.builtin.file: { src: /usr/local/bin/loki-linux-amd64, dest: /usr/local/bin/loki, state: link, force: true }
+
+- name: loki config
+  ansible.builtin.copy:
+    dest: /etc/loki.yaml
+    mode: "0644"
+    content: |
+      auth_enabled: false
+      server: { http_listen_port: 3100 }
+      common:
+        instance_addr: 127.0.0.1
+        path_prefix: /var/lib/loki
+        storage: { filesystem: { chunks_directory: /var/lib/loki/chunks, rules_directory: /var/lib/loki/rules } }
+        replication_factor: 1
+        ring: { kvstore: { store: inmemory } }
+      schema_config:
+        configs:
+          - from: 2024-01-01
+            store: tsdb
+            object_store: filesystem
+            schema: v13
+            index: { prefix: index_, period: 24h }
+  notify: restart loki
+- name: loki systemd
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/loki.service
+    content: |
+      [Unit]
+      Description=Loki
+      After=network-online.target
+      [Service]
+      User=loki
+      Group=loki
+      ExecStart=/usr/local/bin/loki -config.file=/etc/loki.yaml
+      Restart=always
+      [Install]
+      WantedBy=multi-user.target
+  notify: restart loki
+- ansible.builtin.systemd: { name: loki, enabled: true, state: started, daemon_reload: true }
+
+# --- Grafana (apt) ---
+- name: grafana apt key
+  ansible.builtin.get_url: { url: https://apt.grafana.com/gpg.key, dest: /usr/share/keyrings/grafana.asc, mode: "0644" }
+  register: gk
+  retries: 3
+  delay: 5
+  until: gk is succeeded
+- name: grafana apt repo
+  ansible.builtin.apt_repository:
+    repo: "deb [signed-by=/usr/share/keyrings/grafana.asc] https://apt.grafana.com stable main"
+    filename: grafana
+    state: present
+- name: install grafana
+  ansible.builtin.apt: { name: grafana, state: present, update_cache: true }
+- name: grafana admin password (seeded)
+  ansible.builtin.lineinfile:
+    path: /etc/grafana/grafana.ini
+    regexp: '^;?admin_password ='
+    line: "admin_password = {{ seed.admin_pass }}"
+  notify: restart grafana
+- name: enable + start grafana
+  ansible.builtin.systemd: { name: grafana-server, enabled: true, state: started, daemon_reload: true }
+
+- name: wait for grafana
+  ansible.builtin.wait_for: { port: 3000, host: 127.0.0.1, timeout: 90 }

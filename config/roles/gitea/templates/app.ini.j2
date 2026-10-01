@@ -1,0 +1,54 @@
+APP_NAME = Driftwood Git
+RUN_USER = git
+RUN_MODE = prod
+WORK_PATH = /var/lib/gitea
+
+[server]
+PROTOCOL = http
+HTTP_ADDR = 0.0.0.0
+HTTP_PORT = 3000
+DOMAIN = gitea
+ROOT_URL = http://gitea:3000/
+START_SSH_SERVER = true
+SSH_PORT = 2222
+LFS_START_SERVER = true
+
+[database]
+DB_TYPE = sqlite3
+PATH = /var/lib/gitea/data/gitea.db
+
+[security]
+INSTALL_LOCK = true
+SECRET_KEY = {{ gitea_secret_key }}
+INTERNAL_TOKEN = {{ gitea_internal_token }}
+PASSWORD_HASH_ALGO = pbkdf2
+MIN_PASSWORD_LENGTH = 10
+
+[service]
+DISABLE_REGISTRATION = true
+REQUIRE_SIGNIN_VIEW = false
+DEFAULT_KEEP_EMAIL_PRIVATE = true
+ENABLE_NOTIFY_MAIL = false
+
+[repository]
+DEFAULT_PRIVATE = private
+DISABLE_HTTP_GIT = false
+
+[actions]
+ENABLED = true
+
+[log]
+MODE = file
+LEVEL = info
+ROOT_PATH = /var/lib/gitea/log
+
+[session]
+PROVIDER = file
+
+[oauth2]
+ENABLE = false
+
+[webhook]
+# allow webhooks to internal targets (Atlantis, etc.) — this estate is VPN-gated and all
+# webhook endpoints are on the private VPC. Without this, Gitea's SSRF guard denies them.
+ALLOWED_HOST_LIST = private,loopback

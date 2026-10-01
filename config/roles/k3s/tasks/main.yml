@@ -1,0 +1,25 @@
+---
+# k3s — single-node Kubernetes (containerd; the one place Docker-family runtime is allowed).
+- name: install k3s {{ versions.k3s }} (once)
+  # --disable traefik: free :80/:443 for the co-located app_prod nginx (Argo is exposed via NodePort)
+  ansible.builtin.shell: curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION={{ versions.k3s }} sh -s - --write-kubeconfig-mode 644 --disable traefik
+  args: { creates: /usr/local/bin/k3s }
+  register: k3s_install
+  retries: 2
+  delay: 10
+  until: k3s_install is succeeded
+
+- name: kubectl symlink
+  ansible.builtin.file: { src: /usr/local/bin/k3s, dest: /usr/local/bin/kubectl, state: link, force: true }
+
+- name: enable + start k3s
+  ansible.builtin.systemd: { name: k3s, enabled: true, state: started }
+
+- name: wait for node Ready
+  ansible.builtin.shell: k3s kubectl wait --for=condition=Ready node --all --timeout=180s
+  environment: { KUBECONFIG: /etc/rancher/k3s/k3s.yaml }
+  register: k3s_ready
+  changed_when: false
+  retries: 6
+  delay: 15
+  until: k3s_ready.rc == 0

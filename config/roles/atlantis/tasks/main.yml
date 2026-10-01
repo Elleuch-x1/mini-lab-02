@@ -1,0 +1,114 @@
+---
+# Atlantis — Terraform PR automation, wired to Gitea. Native systemd, hardened baseline (M1):
+# scoped repo-allowlist, webhook secret set. (Webhooks per-repo are wired in M1.3 seed.)
+- name: atlantis user + dirs
+  ansible.builtin.user: { name: atlantis, system: true, shell: /sbin/nologin, home: /var/lib/atlantis, create_home: true }
+- ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: atlantis
+    group: atlantis
+    mode: "0750"
+  loop: [/etc/atlantis, /var/lib/atlantis, /var/lib/atlantis/data]
+
+- name: install unzip
+  ansible.builtin.apt: { name: unzip, state: present }
+
+- name: download atlantis {{ versions.atlantis }}
+  ansible.builtin.unarchive:
+    src: "https://github.com/runatlantis/atlantis/releases/download/v{{ versions.atlantis }}/atlantis_linux_amd64.zip"
+    dest: /usr/local/bin
+    remote_src: true
+    creates: /usr/local/bin/atlantis
+  register: atl_dl
+  retries: 3
+  delay: 5
+  until: atl_dl is succeeded
+
+- name: webhook secret (once)
+  ansible.builtin.shell: "openssl rand -hex 24"
+  args: { creates: /etc/atlantis/webhook.secret }
+  register: atl_wh
+- name: persist webhook secret
+  ansible.builtin.copy:
+    dest: /etc/atlantis/webhook.secret
+    content: "{{ atl_wh.stdout }}"
+    owner: atlantis
+    group: atlantis
+    mode: "0600"
+  when: atl_wh is changed
+- name: read webhook secret
+  ansible.builtin.slurp: { src: /etc/atlantis/webhook.secret }
+  register: atl_wh_file
+- ansible.builtin.set_fact:
+    atlantis_webhook_secret: "{{ atl_wh_file.content | b64decode | trim }}"
+
+# --- self-provision a Gitea token for atlantis (delete+create so we always capture the value) ---
+- name: delete existing atlantis gitea token (if any)
+  ansible.builtin.uri:
+    url: "http://gitea:3000/api/v1/users/{{ seed.admin_user }}/tokens/atlantis"
+    method: DELETE
+    user: "{{ seed.admin_user }}"
+    password: "{{ seed.admin_pass }}"
+    force_basic_auth: true
+    status_code: [204, 404]
+- name: create atlantis gitea token
+  ansible.builtin.uri:
+    url: "http://gitea:3000/api/v1/users/{{ seed.admin_user }}/tokens"
+    method: POST
+    user: "{{ seed.admin_user }}"
+    password: "{{ seed.admin_pass }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      name: atlantis
+      scopes: ["write:repository", "write:organization", "write:issue", "read:user"]
+    status_code: [201]
+  register: atl_token
+
+- name: env file
+  ansible.builtin.copy:
+    dest: /etc/atlantis/atlantis.env
+    owner: atlantis
+    group: atlantis
+    mode: "0600"
+    content: |
+      ATLANTIS_GITEA_USER={{ seed.admin_user }}
+      ATLANTIS_GITEA_TOKEN={{ atl_token.json.sha1 }}
+      ATLANTIS_GITEA_BASE_URL=http://gitea:3000
+      ATLANTIS_GITEA_WEBHOOK_SECRET={{ atlantis_webhook_secret }}
+      ATLANTIS_REPO_ALLOWLIST=*
+      ATLANTIS_ATLANTIS_URL=http://atlantis:4141
+      ATLANTIS_PORT=4141
+      ATLANTIS_DATA_DIR=/var/lib/atlantis/data
+      ATLANTIS_WRITE_GIT_CREDS=true
+      # download our own terraform so startup doesn't depend on tf_exec having installed it first
+      ATLANTIS_DEFAULT_TF_VERSION={{ versions.terraform }}
+      ATLANTIS_AUTOPLAN_FILE_LIST=**/*.tf,**/*.tfvars
+      # state-backend (MinIO/S3) creds so `terraform init` of the infra backend works at plan time.
+      # (Realistic: the CI automation holds the state key — and it becomes loot after RCE.)
+      AWS_ACCESS_KEY_ID=terraform-ci
+      AWS_SECRET_ACCESS_KEY=Tf-St4te-RW-2026!
+      AWS_REGION=eu-west-3
+  notify: restart atlantis
+
+- name: systemd unit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/atlantis.service
+    content: |
+      [Unit]
+      Description=Atlantis
+      After=network-online.target
+      Wants=network-online.target
+      [Service]
+      User=atlantis
+      Group=atlantis
+      EnvironmentFile=/etc/atlantis/atlantis.env
+      ExecStart=/usr/local/bin/atlantis server
+      Restart=always
+      [Install]
+      WantedBy=multi-user.target
+  notify: restart atlantis
+
+- name: enable + start atlantis
+  ansible.builtin.systemd: { name: atlantis, enabled: true, state: started, daemon_reload: true }

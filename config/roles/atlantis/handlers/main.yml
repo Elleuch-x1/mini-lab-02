@@ -1,0 +1,3 @@
+---
+- name: restart atlantis
+  ansible.builtin.systemd: { name: atlantis, state: restarted, daemon_reload: true }

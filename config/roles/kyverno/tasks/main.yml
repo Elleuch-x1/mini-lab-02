@@ -1,0 +1,21 @@
+---
+# Kyverno — admission control in k3s. Baseline policies ENFORCE (no privileged/hostPath); the
+# POL-3 / K8S scenarios exploit a deliberate policy gap in the attack layer.
+- name: install kyverno {{ versions.kyverno }}
+  ansible.builtin.shell: >
+    k3s kubectl apply -f
+    https://github.com/kyverno/kyverno/releases/download/{{ versions.kyverno }}/install.yaml
+  environment: { KUBECONFIG: /etc/rancher/k3s/k3s.yaml }
+  register: kyverno_install
+  changed_when: true
+  retries: 3
+  delay: 10
+  until: kyverno_install.rc == 0
+
+- name: wait for kyverno admission controller rollout
+  ansible.builtin.shell: k3s kubectl -n kyverno rollout status deploy/kyverno-admission-controller --timeout=240s
+  environment: { KUBECONFIG: /etc/rancher/k3s/k3s.yaml }
+  changed_when: false
+  retries: 3
+  delay: 15
+  until: true

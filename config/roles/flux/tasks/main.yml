@@ -1,0 +1,27 @@
+---
+# Flux CD — GitOps controllers in k3s (alternative to Argo; hosts the Flux-specific RCE scenario K8S-3).
+- name: install flux CLI {{ versions.flux }} (once)
+  ansible.builtin.shell: |
+    curl -s https://fluxcd.io/install.sh | FLUX_VERSION={{ versions.flux }} bash
+  args: { creates: /usr/local/bin/flux }
+  register: flux_cli
+  retries: 3
+  delay: 5
+  until: flux_cli is succeeded
+
+- name: flux install (bootstrap controllers into the cluster)
+  ansible.builtin.command: /usr/local/bin/flux install
+  environment: { KUBECONFIG: /etc/rancher/k3s/k3s.yaml }
+  register: flux_install
+  changed_when: "'installed' in flux_install.stdout or flux_install.rc == 0"
+  retries: 2
+  delay: 10
+  until: flux_install.rc == 0
+
+- name: wait for flux controllers
+  ansible.builtin.shell: k3s kubectl -n flux-system rollout status deploy/source-controller --timeout=180s
+  environment: { KUBECONFIG: /etc/rancher/k3s/k3s.yaml }
+  changed_when: false
+  retries: 3
+  delay: 10
+  until: true

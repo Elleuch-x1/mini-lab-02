@@ -1,0 +1,3 @@
+---
+- name: restart act_runner
+  ansible.builtin.systemd: { name: act_runner, state: restarted, daemon_reload: true }

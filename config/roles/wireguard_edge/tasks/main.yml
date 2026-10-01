@@ -1,0 +1,26 @@
+---
+# WireGuard on vpn-edge is brought up by cloud-init at boot; this role just makes it idempotent
+# (reload on config change) and ensures forwarding/NAT survive reconfig.
+- name: Ensure wireguard + nftables present
+  ansible.builtin.apt:
+    name: [wireguard, iptables]
+    state: present
+
+- name: Enable IPv4 forwarding
+  ansible.posix.sysctl:
+    name: net.ipv4.ip_forward
+    value: "1"
+    state: present
+    reload: true
+
+- name: Ensure wg-quick@wg0 enabled & running
+  ansible.builtin.systemd:
+    name: wg-quick@wg0
+    enabled: true
+    state: started
+
+- name: Reverse proxy (nginx) for player-facing service names
+  ansible.builtin.apt:
+    name: nginx
+    state: present
+# TODO(M1.2): nginx vhosts mapping driftwood.lab service names → internal hosts over the VPC.

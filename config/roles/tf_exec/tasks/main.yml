@@ -1,0 +1,52 @@
+---
+# tf-exec — the Terraform/OpenTofu apply host. Installs both CLIs + points at the internal provider mirror.
+- name: install unzip
+  ansible.builtin.apt: { name: unzip, state: present }
+
+- name: install terraform {{ versions.terraform }}
+  ansible.builtin.unarchive:
+    src: "https://releases.hashicorp.com/terraform/{{ versions.terraform }}/terraform_{{ versions.terraform }}_linux_amd64.zip"
+    dest: /usr/local/bin
+    remote_src: true
+    creates: /usr/local/bin/terraform
+  register: tf_dl
+  retries: 3
+  delay: 5
+  until: tf_dl is succeeded
+
+- name: install opentofu {{ versions.opentofu }}
+  ansible.builtin.unarchive:
+    src: "https://github.com/opentofu/opentofu/releases/download/v{{ versions.opentofu }}/tofu_{{ versions.opentofu }}_linux_amd64.zip"
+    dest: /usr/local/bin
+    remote_src: true
+    creates: /usr/local/bin/tofu
+  register: tofu_dl
+  retries: 3
+  delay: 5
+  until: tofu_dl is succeeded
+
+- name: deployer user (the apply identity) + workdir
+  ansible.builtin.user: { name: deployer, shell: /bin/bash, home: /home/deployer, create_home: true }
+
+- name: workspace dir
+  ansible.builtin.file: { path: /opt/iac, state: directory, owner: deployer, group: deployer, mode: "0750" }
+
+# Providers are fetched directly from the registry (egress is open during play). The internal
+# mirror on backend:8080 stays as a decoy / future offline option — NOT enforced, so `terraform
+# init` works out of the box. (Enforcing an empty mirror would break every plan/apply.)
+- name: .terraformrc (direct provider installation)
+  ansible.builtin.copy:
+    dest: /home/deployer/.terraformrc
+    owner: deployer
+    group: deployer
+    mode: "0644"
+    content: |
+      disable_checkpoint = true
+      provider_installation {
+        direct {}
+      }
+
+- name: versions check
+  ansible.builtin.command: "{{ item }} version"
+  loop: ["/usr/local/bin/terraform", "/usr/local/bin/tofu"]
+  changed_when: false

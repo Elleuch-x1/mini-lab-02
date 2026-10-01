@@ -1,0 +1,129 @@
+---
+# HashiCorp Vault — native, file storage, auto-unseal helper, KV engine. Enforced-policy secrets store.
+- name: vault user
+  ansible.builtin.user: { name: vault, system: true, shell: /sbin/nologin, home: /var/lib/vault, create_home: true }
+
+- name: dirs
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: vault
+    group: vault
+    mode: "0750"
+  loop: [/etc/vault.d, /var/lib/vault, /var/lib/vault/data]
+
+- name: install unzip
+  ansible.builtin.apt: { name: unzip, state: present }
+
+- name: download + install vault {{ versions.vault }}
+  ansible.builtin.unarchive:
+    src: "https://releases.hashicorp.com/vault/{{ versions.vault }}/vault_{{ versions.vault }}_linux_amd64.zip"
+    dest: /usr/local/bin
+    remote_src: true
+    creates: /usr/local/bin/vault
+  register: vault_dl
+  retries: 3
+  delay: 5
+  until: vault_dl is succeeded
+
+- name: config
+  ansible.builtin.copy:
+    dest: /etc/vault.d/vault.hcl
+    owner: vault
+    group: vault
+    mode: "0640"
+    content: |
+      ui = true
+      disable_mlock = true
+      storage "file" { path = "/var/lib/vault/data" }
+      listener "tcp" {
+        address     = "0.0.0.0:8200"
+        tls_disable = 1
+      }
+      api_addr = "http://{{ inventory_hostname }}:8200"
+  notify: restart vault
+
+- name: systemd unit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/vault.service
+    content: |
+      [Unit]
+      Description=Vault
+      After=network-online.target
+      Wants=network-online.target
+      [Service]
+      User=vault
+      Group=vault
+      ExecStart=/usr/local/bin/vault server -config=/etc/vault.d/vault.hcl
+      Restart=always
+      LimitMEMLOCK=infinity
+      [Install]
+      WantedBy=multi-user.target
+  notify: restart vault
+
+- name: enable + start vault
+  ansible.builtin.systemd: { name: vault, enabled: true, state: started, daemon_reload: true }
+
+- name: wait for vault api
+  ansible.builtin.wait_for: { port: 8200, host: 127.0.0.1, timeout: 60 }
+
+- name: check init status
+  ansible.builtin.command: vault status -format=json
+  environment: { VAULT_ADDR: "http://127.0.0.1:8200" }
+  register: vstatus
+  changed_when: false
+  failed_when: false
+
+- name: initialize vault (1 key share, lab) if needed
+  ansible.builtin.command: vault operator init -key-shares=1 -key-threshold=1 -format=json
+  environment: { VAULT_ADDR: "http://127.0.0.1:8200" }
+  register: vinit
+  when: "'\"initialized\":false' in (vstatus.stdout | default('')) or (vstatus.rc | default(1)) != 0"
+
+- name: persist init material (host-local, 0600)
+  ansible.builtin.copy:
+    dest: /etc/vault.d/init.json
+    content: "{{ vinit.stdout }}"
+    owner: vault
+    group: vault
+    mode: "0600"
+  when: vinit is defined and vinit.changed
+
+- name: auto-unseal helper (unseal on boot from init.json)
+  ansible.builtin.copy:
+    dest: /usr/local/bin/vault-unseal.sh
+    mode: "0750"
+    content: |
+      #!/usr/bin/env bash
+      export VAULT_ADDR=http://127.0.0.1:8200
+      key=$(jq -r '.unseal_keys_b64[0]' /etc/vault.d/init.json 2>/dev/null) || exit 0
+      [ -n "$key" ] && vault operator unseal "$key" >/dev/null 2>&1 || true
+
+- name: unseal service (oneshot after vault)
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/vault-unseal.service
+    content: |
+      [Unit]
+      Description=Vault auto-unseal
+      After=vault.service
+      Requires=vault.service
+      [Service]
+      Type=oneshot
+      ExecStartPre=/bin/sleep 3
+      ExecStart=/usr/local/bin/vault-unseal.sh
+      RemainAfterExit=true
+      [Install]
+      WantedBy=multi-user.target
+  notify: reload systemd
+
+- name: enable + run unseal now
+  ansible.builtin.systemd: { name: vault-unseal, enabled: true, state: started, daemon_reload: true }
+
+- name: enable KV v2 at secret/ (idempotent)
+  ansible.builtin.shell: |
+    export VAULT_ADDR=http://127.0.0.1:8200
+    export VAULT_TOKEN=$(jq -r '.root_token' /etc/vault.d/init.json)
+    vault secrets list -format=json | grep -q '"secret/"' || vault secrets enable -path=secret kv-v2
+  register: kv
+  changed_when: "'Success' in kv.stdout or kv.rc == 0"
+  failed_when: false

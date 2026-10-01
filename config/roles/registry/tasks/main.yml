@@ -1,0 +1,66 @@
+---
+# Container/artifact registry — the distribution/registry binary, NATIVE (no Docker).
+# Holds team images; the supply-chain scenarios (SUP-3/4, SEC-1) poison/pull from here.
+- name: registry user + dirs
+  ansible.builtin.user: { name: registry, system: true, shell: /sbin/nologin, home: /var/lib/registry, create_home: true }
+- ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: registry
+    group: registry
+    mode: "0750"
+  loop: [/etc/registry, /var/lib/registry/data]
+
+- name: download registry {{ versions.registry }}
+  ansible.builtin.unarchive:
+    src: "https://github.com/distribution/distribution/releases/download/v{{ versions.registry }}/registry_{{ versions.registry }}_linux_amd64.tar.gz"
+    dest: /usr/local/bin
+    remote_src: true
+    creates: /usr/local/bin/registry
+    extra_opts: ["registry"]
+  register: reg_dl
+  retries: 3
+  delay: 5
+  until: reg_dl is succeeded
+
+- name: config (filesystem storage, :5000, delete enabled)
+  ansible.builtin.copy:
+    dest: /etc/registry/config.yml
+    owner: registry
+    group: registry
+    mode: "0640"
+    content: |
+      version: 0.1
+      log: { level: info }
+      storage:
+        filesystem: { rootdirectory: /var/lib/registry/data }
+        delete: { enabled: true }
+      http:
+        addr: 0.0.0.0:5000
+        headers: { X-Content-Type-Options: [nosniff] }
+      health:
+        storagedriver: { enabled: true, interval: 10s, threshold: 3 }
+  notify: restart registry
+
+- name: systemd unit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/registry.service
+    content: |
+      [Unit]
+      Description=Container registry
+      After=network-online.target
+      Wants=network-online.target
+      [Service]
+      User=registry
+      Group=registry
+      ExecStart=/usr/local/bin/registry serve /etc/registry/config.yml
+      Restart=always
+      [Install]
+      WantedBy=multi-user.target
+  notify: restart registry
+
+- name: enable + start registry
+  ansible.builtin.systemd: { name: registry, enabled: true, state: started, daemon_reload: true }
+
+- name: wait for registry
+  ansible.builtin.wait_for: { port: 5000, host: 127.0.0.1, timeout: 60 }

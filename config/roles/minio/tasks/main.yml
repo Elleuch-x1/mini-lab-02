@@ -1,0 +1,104 @@
+---
+# MinIO (S3-compatible object store) — holds Terraform state + is the enforced "cloud IAM" surface.
+# Native systemd, hardened baseline (strong root creds, TLS off on private net for M1).
+- name: minio-user system account
+  ansible.builtin.user:
+    name: minio-user
+    system: true
+    shell: /sbin/nologin
+    home: /var/lib/minio
+    create_home: true
+
+- name: data dir
+  ansible.builtin.file:
+    path: /var/lib/minio/data
+    state: directory
+    owner: minio-user
+    group: minio-user
+    mode: "0750"
+
+# MinIO retired its public server binaries (dl.min.io → HTTP 410). Build from source via Go.
+- name: build swap (minio compile is RAM-heavy on a 4GB host)
+  ansible.builtin.shell: |
+    fallocate -l 4G /swapfile && chmod 600 /swapfile && mkswap /swapfile && swapon /swapfile
+  args: { creates: /swapfile }
+
+- name: install Go toolchain {{ versions.go }}
+  ansible.builtin.unarchive:
+    src: "https://go.dev/dl/go{{ versions.go }}.linux-amd64.tar.gz"
+    dest: /usr/local
+    remote_src: true
+    creates: /usr/local/go/bin/go
+  register: go_dl
+  retries: 3
+  delay: 5
+  until: go_dl is succeeded
+
+- name: build + install minio from source (go install; slow, ~5-10 min)
+  ansible.builtin.command:
+    cmd: /usr/local/go/bin/go install github.com/minio/minio@{{ versions.minio }}
+    creates: /usr/local/bin/minio
+  environment:
+    GOBIN: /usr/local/bin
+    GOPATH: /root/go
+    GOCACHE: /root/.cache/go-build
+    CGO_ENABLED: "0"
+    PATH: "/usr/local/go/bin:/usr/bin:/bin"
+  register: minio_build
+  retries: 2
+  delay: 10
+  until: minio_build is succeeded
+
+- name: download mc client (GitHub release; dl.min.io retired)
+  ansible.builtin.get_url:
+    url: "https://github.com/minio/mc/releases/download/{{ versions.mc_release }}/mc.linux-amd64.{{ versions.mc_release }}"
+    dest: /usr/local/bin/mc
+    mode: "0755"
+  register: mc_bin
+  retries: 3
+  delay: 5
+  until: mc_bin is succeeded
+
+- name: environment file (root creds + bind)
+  ansible.builtin.copy:
+    dest: /etc/default/minio
+    mode: "0640"
+    content: |
+      MINIO_ROOT_USER={{ seed.minio_root_user }}
+      MINIO_ROOT_PASSWORD={{ seed.minio_root_pass }}
+      MINIO_VOLUMES=/var/lib/minio/data
+      MINIO_OPTS=--address :9000 --console-address :9001
+      MINIO_BROWSER=on
+  notify: restart minio
+
+- name: systemd unit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/minio.service
+    content: |
+      [Unit]
+      Description=MinIO
+      After=network-online.target
+      Wants=network-online.target
+      [Service]
+      User=minio-user
+      Group=minio-user
+      EnvironmentFile=/etc/default/minio
+      ExecStart=/usr/local/bin/minio server $MINIO_OPTS $MINIO_VOLUMES
+      Restart=always
+      LimitNOFILE=65536
+      [Install]
+      WantedBy=multi-user.target
+  notify: restart minio
+
+- name: enable + start minio
+  ansible.builtin.systemd:
+    name: minio
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: wait for minio
+  ansible.builtin.wait_for:
+    port: 9000
+    host: 127.0.0.1
+    timeout: 60

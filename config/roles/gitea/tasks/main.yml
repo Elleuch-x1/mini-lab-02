@@ -1,0 +1,129 @@
+---
+# Gitea (SCM + Gitea Actions), native systemd service, hardened baseline (M1).
+- name: git system user
+  ansible.builtin.user:
+    name: git
+    system: true
+    shell: /bin/bash
+    home: /home/git
+    create_home: true
+
+- name: directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: git
+    group: git
+    mode: "0750"
+  loop: [/var/lib/gitea, /var/lib/gitea/custom, /var/lib/gitea/data, /var/lib/gitea/log, /etc/gitea]
+
+- name: download gitea {{ versions.gitea }}
+  ansible.builtin.get_url:
+    url: "https://dl.gitea.com/gitea/{{ versions.gitea }}/gitea-{{ versions.gitea }}-linux-amd64"
+    dest: /usr/local/bin/gitea
+    mode: "0755"
+  register: gitea_bin
+  retries: 3
+  delay: 5
+  until: gitea_bin is succeeded
+
+- name: generate secrets (once, before app.ini exists)
+  ansible.builtin.shell: |
+    set -e
+    echo "SECRET_KEY=$(/usr/local/bin/gitea generate secret SECRET_KEY)"
+    echo "INTERNAL_TOKEN=$(/usr/local/bin/gitea generate secret INTERNAL_TOKEN)"
+  args:
+    creates: /etc/gitea/app.ini
+  register: gitea_secrets
+  become: true
+  become_user: git
+
+- name: stash secrets (only when first generated)
+  ansible.builtin.set_fact:
+    gitea_secret_key: "{{ (gitea_secrets.stdout_lines | select('match', 'SECRET_KEY=') | first).split('=', 1)[1] }}"
+    gitea_internal_token: "{{ (gitea_secrets.stdout_lines | select('match', 'INTERNAL_TOKEN=') | first).split('=', 1)[1] }}"
+  when: gitea_secrets is changed
+
+- name: app.ini (hardened)
+  ansible.builtin.template:
+    src: app.ini.j2
+    dest: /etc/gitea/app.ini
+    owner: git
+    group: git
+    mode: "0640"
+  when: gitea_secrets is changed
+  notify: restart gitea
+
+# app.ini template only re-renders on first install (secrets gating). Settings that must apply to
+# an EXISTING install go here as idempotent ini edits:
+#  - webhook allowlist: let Gitea deliver webhooks to internal targets (Atlantis).
+#  - ROOT_URL/DOMAIN = gitea:3000: so clone URLs the API/webhooks hand out are reachable
+#    (the FQDN on :80 hits the edge nginx -> "repository not found" for Atlantis).
+- name: app.ini settings that must apply to existing installs (idempotent)
+  community.general.ini_file:
+    path: /etc/gitea/app.ini
+    section: "{{ item.s }}"
+    option: "{{ item.o }}"
+    value: "{{ item.v }}"
+    owner: git
+    group: git
+    mode: "0640"
+  loop:
+    - { s: webhook, o: ALLOWED_HOST_LIST, v: "private,loopback" }
+    - { s: server,  o: ROOT_URL,          v: "http://gitea:3000/" }
+    - { s: server,  o: DOMAIN,            v: "gitea" }
+  notify: restart gitea
+
+- name: systemd unit
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/gitea.service
+    content: |
+      [Unit]
+      Description=Gitea
+      After=network.target
+      [Service]
+      User=git
+      Group=git
+      WorkingDirectory=/var/lib/gitea
+      Environment=GITEA_WORK_DIR=/var/lib/gitea
+      ExecStart=/usr/local/bin/gitea web --config /etc/gitea/app.ini
+      Restart=always
+      [Install]
+      WantedBy=multi-user.target
+  notify: restart gitea
+
+- name: enable + start gitea
+  ansible.builtin.systemd:
+    name: gitea
+    enabled: true
+    state: started
+    daemon_reload: true
+
+- name: wait for gitea http
+  ansible.builtin.wait_for:
+    port: 3000
+    host: 127.0.0.1
+    timeout: 90
+
+- name: create admin (idempotent)
+  ansible.builtin.command:
+    cmd: >
+      /usr/local/bin/gitea admin user create
+      --config /etc/gitea/app.ini
+      --username {{ seed.admin_user }} --password {{ seed.admin_pass }}
+      --email admin@{{ lab_domain }} --admin --must-change-password=false
+    creates: /var/lib/gitea/.admin_created
+  environment: { GITEA_WORK_DIR: /var/lib/gitea }
+  become: true
+  become_user: git
+  register: gitea_admin
+  changed_when: gitea_admin.rc == 0
+  failed_when: gitea_admin.rc != 0 and 'already exists' not in (gitea_admin.stderr | default(''))
+
+- name: mark admin created
+  ansible.builtin.file:
+    path: /var/lib/gitea/.admin_created
+    state: touch
+    owner: git
+    group: git
+  when: gitea_admin is changed

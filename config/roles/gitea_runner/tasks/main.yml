@@ -1,0 +1,89 @@
+---
+# Gitea Actions runner (act_runner) in HOST execution mode (no Docker) on runner-shared.
+# Hardened baseline: dedicated non-root 'runner' user. (Attack layer later makes it privileged.)
+- name: runner user + dirs
+  ansible.builtin.user: { name: runner, shell: /bin/bash, home: /home/runner, create_home: true }
+- ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: runner
+    group: runner
+    mode: "0750"
+  loop: [/etc/act_runner, /var/lib/act_runner]
+
+- name: base tools act jobs expect (host mode)
+  ansible.builtin.apt:
+    name: [git, curl, jq, nodejs, bash, ca-certificates]
+    state: present
+
+- name: download act_runner {{ versions.act_runner }}
+  ansible.builtin.get_url:
+    url: "https://dl.gitea.com/act_runner/{{ versions.act_runner }}/act_runner-{{ versions.act_runner }}-linux-amd64"
+    dest: /usr/local/bin/act_runner
+    mode: "0755"
+  register: ar_dl
+  retries: 3
+  delay: 5
+  until: ar_dl is succeeded
+
+- name: config.yaml (host labels — run jobs directly on the host)
+  ansible.builtin.copy:
+    dest: /etc/act_runner/config.yaml
+    owner: runner
+    group: runner
+    mode: "0640"
+    content: |
+      log:
+        level: info
+      runner:
+        file: /var/lib/act_runner/.runner
+        capacity: 2
+        timeout: 30m
+        labels:
+          - "ubuntu-latest:host"
+          - "host:host"
+  notify: restart act_runner
+
+- name: generate a runner registration token on the gitea host (extract token only; CLI emits logs)
+  ansible.builtin.shell: >
+    /usr/local/bin/gitea --config /etc/gitea/app.ini actions generate-runner-token 2>/dev/null
+    | grep -oE '[A-Za-z0-9]{40}' | tail -1
+  environment: { GITEA_WORK_DIR: /var/lib/gitea }
+  become: true
+  become_user: git
+  delegate_to: "{{ groups['gitea'][0] }}"
+  register: reg_token
+  changed_when: false
+  failed_when: reg_token.stdout | length != 40
+
+- name: register act_runner with gitea (idempotent)
+  ansible.builtin.command:
+    cmd: >
+      /usr/local/bin/act_runner register --no-interactive
+      --instance http://gitea:3000 --token {{ reg_token.stdout | trim }}
+      --name {{ inventory_hostname }} --labels ubuntu-latest:host,host:host
+    chdir: /var/lib/act_runner
+    creates: /var/lib/act_runner/.runner
+  become: true
+  become_user: runner
+
+- name: systemd unit (daemon)
+  ansible.builtin.copy:
+    dest: /etc/systemd/system/act_runner.service
+    content: |
+      [Unit]
+      Description=Gitea Act Runner
+      After=network-online.target
+      Wants=network-online.target
+      [Service]
+      User=runner
+      Group=runner
+      WorkingDirectory=/var/lib/act_runner
+      ExecStart=/usr/local/bin/act_runner daemon --config /etc/act_runner/config.yaml
+      Restart=always
+      [Install]
+      WantedBy=multi-user.target
+  notify: restart act_runner
+
+- name: enable + start act_runner
+  ansible.builtin.systemd: { name: act_runner, enabled: true, state: started, daemon_reload: true }

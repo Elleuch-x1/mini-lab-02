@@ -1,0 +1,79 @@
+---
+# mini-lab-02 master playbook. Controller = edge; runs against the 9 hosts over the VPC.
+# Groups come from the terraform-generated inventory (config/inventory/hosts.ini).
+
+- name: Base (all hosts)
+  hosts: all
+  become: true
+  pre_tasks:
+    - name: wait for cloud-init to finish (releases the apt lock before any apt task)
+      ansible.builtin.command: timeout 120 cloud-init status --wait
+      changed_when: false
+      failed_when: false
+    - name: compute enabled scenarios from profile + per-scenario overrides
+      ansible.builtin.set_fact:
+        enabled_scenarios: >-
+          {{ ((profile_presets[profile] | default([]))
+              + (scenarios | default({}) | dict2items | selectattr('value') | map(attribute='key') | list))
+             | unique
+             | difference(scenarios | default({}) | dict2items | rejectattr('value') | map(attribute='key') | list) }}
+    - name: show active profile + scenarios
+      ansible.builtin.debug:
+        msg: "profile={{ profile }} enabled_scenarios={{ enabled_scenarios }}"
+  roles: [common]
+
+- name: Edge — WireGuard (public host + controller)
+  hosts: wireguard
+  become: true
+  roles: [wireguard_edge, scoreboard]
+
+- name: SCM — Gitea (team alpha)
+  hosts: gitea
+  become: true
+  roles: [gitea]
+- name: SCM — GitLab (team beta)
+  hosts: gitlab
+  become: true
+  roles: [gitlab]
+
+- name: Run tier — shared self-hosted runners
+  hosts: gitea_runner
+  become: true
+  roles: [gitea_runner]
+- hosts: gitlab_runner
+  become: true
+  roles: [gitlab_runner]
+
+- name: IaC tier — Atlantis + Terraform exec
+  hosts: atlantis
+  become: true
+  roles: [atlantis]
+- hosts: tf_exec
+  become: true
+  roles: [tf_exec]
+
+- name: Platform — MinIO (state) + provider mirror + Vault
+  hosts: minio
+  become: true
+  roles: [minio, provider_mirror]
+- hosts: vault
+  become: true
+  roles: [vault]
+
+- name: Platform — container/artifact registry
+  hosts: registry
+  become: true
+  roles: [registry]
+
+- name: Internal tier — k3s + Argo + Flux + Kyverno + prod app
+  hosts: k3s
+  become: true
+  roles: [k3s, argocd, flux, kyverno]
+- hosts: app_prod
+  become: true
+  roles: [app_prod]
+
+- name: Blue-team — SIEM (Loki + Grafana)
+  hosts: siem
+  become: true
+  roles: [siem]
