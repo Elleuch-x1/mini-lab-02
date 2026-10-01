@@ -59,8 +59,24 @@ Harness notes: in-cluster attacker identities use short-lived SA tokens; GitOps 
 - **pbac_4** over-scoped token: a CI bot token (member of a team it shouldn't be) leaks onto the shared
   runner → clones another team's private repo → `MINILAB{pbac_4-overscoped-token}`.
 
+### Pipeline execution / injection (PPE) ✅ (2026-10-01) — 3/3 captured
+Gitea Actions run in **host mode**; GitLab CI uses a **shell** runner — both execute on the runner host,
+so injection = real host RCE.
+- **ppe_1** expression injection: an untrusted commit message is interpolated into a `run:` step →
+  RCE on the runner → `MINILAB{ppe_1-expression-injection}`.
+- **ppe_2** unprotected CI secret: a branch pipeline (attacker-controlled `.gitlab-ci.yml`) reads a
+  non-protected project variable on the shell runner → `MINILAB{ppe_2-fork-mr-secret-exfil}`.
+- **ppe_3** workflow-command injection: a "load build config" step pipes a repo file into `$GITHUB_ENV`;
+  the attacker's edited file defines `$DEPLOY_CMD`, run by a later step → `MINILAB{ppe_3-github-env-injection}`.
+
+Harness/infra notes: act_runner **escapes newlines** in `${{ }}` expression values, so the classic
+commit-message newline→`$GITHUB_ENV` vector is neutralized — ppe_3 uses the untrusted-file vector instead.
+**Fixed a real lab bug:** the gitlab_runner role guarded registration with `creates: config.toml`, but the
+package ships a default config.toml, so `[[runners]]` was never written and GitLab pipelines sat `pending`
+forever — now guarded on the `[[runners]]` block; CI pipelines run to success.
+
 ### Remaining tracks (in progress)
-**Done: 11/26** — tf_1/3/4/5/6, k8s_1/2/3/4, pol_3, pbac_4. Next: ppe (3), pbac_1/2/3, sup (4), sec (2), tf_2, pol_1/2.
+**Done: 14/26** — tf_1/3/4/5/6, k8s_1/2/3/4, pol_3, pbac_4, ppe_1/2/3. Next: pbac_1/2/3, sup (4), sec (2), tf_2, pol_1/2.
 
 
 ## M3 — flagship chains · M4 — blue-team

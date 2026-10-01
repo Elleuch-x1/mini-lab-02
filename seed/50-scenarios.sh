@@ -289,6 +289,20 @@ YML
     gc add -A && gc commit -q -m "add deploy workflow + release config" && gc push -q origin main 2>/dev/null ); fi; rm -rf "$W"
 }
 
+# ---- PPE-2: fork/branch MR pipeline runs with an unprotected project secret in scope ---
+# gap: a CI/CD secret is NOT marked protected, so a pipeline from any branch (attacker-controlled
+# .gitlab-ci.yml) can read it on the shell runner.
+sc_ppe_2(){
+  say "PPE-2 unprotected CI secret exposed to branch pipelines"
+  local GL=http://gitlab PAT=glpat-minilab2automation01 PID
+  PID=$(curl -s -H "PRIVATE-TOKEN: $PAT" "$GL/api/v4/projects?search=web-store" | jq -r '.[0].id' 2>/dev/null)
+  [ -n "$PID" ] && [ "$PID" != null ] || { say "PPE-2: web-store project not found"; return; }
+  curl -s -H "PRIVATE-TOKEN: $PAT" -X DELETE "$GL/api/v4/projects/$PID/variables/DEPLOY_SECRET" >/dev/null 2>&1
+  curl -s -H "PRIVATE-TOKEN: $PAT" -X POST "$GL/api/v4/projects/$PID/variables" \
+    -d "key=DEPLOY_SECRET" --data-urlencode "value=$(flag ppe_2-fork-mr-secret-exfil)" \
+    -d "protected=false" -d "masked=false" >/dev/null 2>&1
+}
+
 # ---- dispatcher ----
 ALL="ppe_1 ppe_2 ppe_3 pbac_1 pbac_2 pbac_3 pbac_4 sup_1 sup_2 sup_3 sup_4 sec_1 sec_2 \
      k8s_1 k8s_2 k8s_3 k8s_4 tf_1 tf_2 tf_3 tf_4 tf_5 tf_6 pol_1 pol_2 pol_3"

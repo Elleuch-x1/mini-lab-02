@@ -36,6 +36,14 @@
   delay: 10
   until: gl_runner.status is defined and gl_runner.status == 201
 
+# NB: the gitlab-runner package ships a default config.toml (globals only, no [[runners]]), so a
+# `creates: config.toml` guard would skip registration forever. Guard on the [[runners]] block instead.
+- name: check whether a runner is already registered locally
+  ansible.builtin.command: grep -c '^\[\[runners\]\]' /etc/gitlab-runner/config.toml
+  register: runners_present
+  changed_when: false
+  failed_when: false
+
 - name: register gitlab-runner (shell executor)
   ansible.builtin.command:
     cmd: >
@@ -43,8 +51,8 @@
       --url http://gitlab.{{ lab_domain }}
       --token {{ gl_runner.json.token }}
       --executor shell --description runner-shared
-    creates: /etc/gitlab-runner/config.toml
   register: gl_reg
+  when: (runners_present.stdout | default('0') | int) == 0
 
 - name: enable + start gitlab-runner
   ansible.builtin.systemd: { name: gitlab-runner, enabled: true, state: started }

