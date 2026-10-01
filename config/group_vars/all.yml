@@ -9,10 +9,13 @@ scenarios: {}            # per-scenario override, e.g. {ppe_1: true}
 
 # scenario IDs (see SCENARIOS.md): ppe_1..3, pbac_1..4, sup_1..4, sec_1..2,
 #   k8s_1..4, tf_1..6, pol_1..3  (26 total). Presets filled in during M2.
+# All 26 scenarios implemented & validated (see VALIDATION.md). trainer = everything on.
 profile_presets:
-  trainer: [tf_3, tf_4, tf_5, tf_6]   # all implemented scenarios (populated as M2 lands them)
-  realistic: [tf_3, tf_4]             # curated subset + decoys
-  insane: [tf_3, tf_4, tf_5, tf_6]    # flagship-chain scenarios
+  trainer: [tf_1, tf_2, tf_3, tf_4, tf_5, tf_6, k8s_1, k8s_2, k8s_3, k8s_4,
+            ppe_1, ppe_2, ppe_3, pbac_1, pbac_2, pbac_3, pbac_4,
+            sup_1, sup_2, sup_3, sup_4, sec_1, sec_2, pol_1, pol_2, pol_3]
+  realistic: [tf_3, tf_4, ppe_1, pbac_1, sup_1, sup_4, k8s_2, sec_2, pol_3]   # curated subset + decoys
+  insane:    [tf_2, tf_3, tf_6, ppe_1, ppe_2, sup_1, pbac_1, k8s_1, k8s_2, sec_2]  # flagship-chain links
 
 # ---- service versions (pinned) ---------------------------------------------
 versions:

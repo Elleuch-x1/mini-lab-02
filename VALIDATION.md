@@ -18,74 +18,26 @@ Fixes found during M1 bring-up (new roles mostly worked first try): gitlab `graf
 gitlab-rails call. All prior mini-lab fixes carried over (MinIO-from-source, cloud-init timeout,
 reserved-IP via doctl, atlantis/gitea config, etc.).
 
-## M2 — scenarios (in progress)
-Each scenario is a hardened⇄vulnerable toggle verified by an **actual exploit playthrough**
-(`verify/playthrough.sh`, run on the edge over the VPC), per the mini-lab standard.
+## M2 — scenarios ✅ COMPLETE (2026-10-01) — 26/26 validated
+Every scenario is a hardened⇄vulnerable toggle verified by an **actual exploit playthrough**
+(`verify/playthrough.sh`, run on the edge over the VPC). **Final run: 26 passed, 0 failed**, both
+per-scenario and all-26-together (regression-clean).
 
-### Terraform / IaC track ✅ (2026-10-01) — 4/4 captured
-`verify/playthrough.sh` → **tf_3, tf_4, tf_5, tf_6 all PASS**:
-- **tf_3** cross-team remote-state exfil: foothold on alpha's apply host (atlantis) loots a leaked
-  beta cloud key → reads team **beta's** MinIO-backed state → `MINILAB{tf_3-cross-team-state}`.
-- **tf_4** writable auto-applied IaC + scheduled apply: attacker with SCM write poisons `alpha/infra`;
-  the cron drift-apply (`iac-apply.sh`) runs it as the privileged **deployer** → `MINILAB{tf_4-state-poisoning}`.
-- **tf_5** transitive module exec: the "trusted" `alpha/tf-modules//note` now sources a nested module
-  whose `local-exec` fires on apply → `MINILAB{tf_5-transitive-module}`.
-- **tf_6** over-privileged apply identity: the apply host holds a **cluster-admin kubeconfig**; its client
-  cert reads a `kube-system` crown secret via the k8s API → `MINILAB{tf_6-k8s-rbac-backdoor}`.
+| Track | Scenarios (all PASS) |
+|-------|----------------------|
+| Terraform/IaC | tf_1 malicious provider (.terraformrc dev-override), tf_2 Atlantis custom-workflow run: RCE, tf_3 cross-team remote state, tf_4 writable state + scheduled apply, tf_5 transitive module exec, tf_6 over-priv apply → k8s RBAC backdoor |
+| GitOps/k8s | k8s_1 Argo AppProject escape, k8s_2 pipeline-SA RBAC escalation, k8s_3 Flux controller abuse, k8s_4 weak ArgoCD admin API |
+| Pipeline injection | ppe_1 expression injection, ppe_2 unprotected-secret branch pipeline, ppe_3 $GITHUB_ENV file injection |
+| Access control | pbac_1 CI_JOB_TOKEN cross-project, pbac_2 rogue runner, pbac_3 branch-protection bypass, pbac_4 over-scoped token |
+| Supply chain | sup_1 action mutable-ref re-point, sup_2 Zip-Slip artifact, sup_3 image :latest poisoning, sup_4 dependency confusion |
+| Secrets/identity | sec_1 CI→cluster kubeconfig pivot, sec_2 Vault k8s-auth over-broad |
+| Policy-as-code | pol_1 conftest coverage gap, pol_2 tfsec soft-fail, pol_3 Kyverno namespace-exclusion bypass |
 
-Harness notes: nested ssh→su quoting is handled via a base64 `rsx` helper; tf_4 uses a `timestamp()`
-trigger so the kill-chain re-fires on every run (repeatable). All four re-run green.
-
-### GitOps / Kubernetes track ✅ (2026-10-01) — 4/4 captured
-`verify/playthrough.sh` → **k8s_1, k8s_2, k8s_3, k8s_4 all PASS**:
-- **k8s_1** ArgoCD AppProject escape: baseline pins alpha to a restricted project; the gap widens it so
-  a committed Job escapes into the **platform** namespace and reads its crown secret → `MINILAB{k8s_1-argo-project-escape}`.
-- **k8s_2** pipeline-SA RBAC escalation: least-priv `alpha-ci` (create pods) launches a pod *as* a parked
-  cluster-admin SA → reads team **beta's** secret → `MINILAB{k8s_2-rbac-escalation}`.
-- **k8s_3** Flux controller abuse: a Flux Kustomization watches an attacker-writable Git path; the
-  cluster-admin kustomize-controller applies a Job into platform → `MINILAB{k8s_3-flux-controller-rce}`.
-- **k8s_4** weak ArgoCD admin on the exposed NodePort API: login `admin:admin123` → create+sync an app
-  that deploys into the restricted platform namespace → `MINILAB{k8s_4-argocd-weak-admin}`.
-
-Harness notes: in-cluster attacker identities use short-lived SA tokens; GitOps kill-chains force-sync
-(Argo refresh / Flux reconcile annotations) then poll the escaped Job's logs; Argo API login needs
-`Content-Type: application/json`.
-
-### IaC / policy / access-control (first slice) ✅ (2026-10-01) — 3/3 captured
-- **tf_1** malicious provider via `.terraformrc` redirect: a `dev_overrides` entry points the null
-  provider at an attacker dir; `terraform plan` launches that binary → RCE → `MINILAB{tf_1-malicious-provider}`.
-- **pol_3** Kyverno admission bypass: the enforce policy is re-applied with a namespace **exclusion**,
-  so a privileged hostPath pod in ns alpha is admitted → reads a node-only flag → `MINILAB{pol_3-kyverno-admission-bypass}`.
-- **pbac_4** over-scoped token: a CI bot token (member of a team it shouldn't be) leaks onto the shared
-  runner → clones another team's private repo → `MINILAB{pbac_4-overscoped-token}`.
-
-### Pipeline execution / injection (PPE) ✅ (2026-10-01) — 3/3 captured
-Gitea Actions run in **host mode**; GitLab CI uses a **shell** runner — both execute on the runner host,
-so injection = real host RCE.
-- **ppe_1** expression injection: an untrusted commit message is interpolated into a `run:` step →
-  RCE on the runner → `MINILAB{ppe_1-expression-injection}`.
-- **ppe_2** unprotected CI secret: a branch pipeline (attacker-controlled `.gitlab-ci.yml`) reads a
-  non-protected project variable on the shell runner → `MINILAB{ppe_2-fork-mr-secret-exfil}`.
-- **ppe_3** workflow-command injection: a "load build config" step pipes a repo file into `$GITHUB_ENV`;
-  the attacker's edited file defines `$DEPLOY_CMD`, run by a later step → `MINILAB{ppe_3-github-env-injection}`.
-
-Harness/infra notes: act_runner **escapes newlines** in `${{ }}` expression values, so the classic
-commit-message newline→`$GITHUB_ENV` vector is neutralized — ppe_3 uses the untrusted-file vector instead.
-**Fixed a real lab bug:** the gitlab_runner role guarded registration with `creates: config.toml`, but the
-package ships a default config.toml, so `[[runners]]` was never written and GitLab pipelines sat `pending`
-forever — now guarded on the `[[runners]]` block; CI pipelines run to success.
-
-### Access control (PBAC) + Supply chain (SUP, partial) ✅ (2026-10-01)
-PBAC 4/4: pbac_1 CI_JOB_TOKEN cross-project (inbound allowlist), pbac_2 rogue runner (leaked token →
-env-dumping pre_build_script steals a victim job's secret while legit runners are paused), pbac_3
-branch-protection bypass → protected release secret, pbac_4 over-scoped token.
-SUP (so far): sup_1 action pinned by mutable ref → re-point a public marketplace action → RCE;
-sup_4 dependency confusion → CI pulls the attacker's higher version off the internal mirror → RCE.
-All via `verify/playthrough.sh`. (sup_2/sup_3, sec_*, tf_2, pol_1/2 still pending.)
-
-### Remaining tracks (in progress)
-**Done: 19/26** — + pbac_1/2/3, sup_1, sup_4. Next: sup_2/3, sec_1/2, tf_2, pol_1/2.
-
+**Infra bugs fixed during M2:** gitlab_runner `creates:`-guard skipped registration (GitLab CI never ran) →
+guard on `[[runners]]`; concurrent=4. Cross-scenario interference removed: tf_1 override moved off
+`hashicorp/null` (was breaking tf_4/tf_5); tf_2/pbac_3/sup_2 made idempotent (unique trigger per run);
+sup_3 pod-log poll scans all pods. act_runner escapes `${{ }}` newlines (ppe_3 uses untrusted-file vector).
 
 ## M3 — flagship chains · M4 — blue-team
+
 Pending M2.

@@ -163,17 +163,17 @@ sc_tf_1(){
   say "TF-1 malicious provider via .terraformrc redirect"
   on "$HOST_TFEXEC" "echo '$(flag tf_1-malicious-provider)' > /home/deployer/tf1-flag.txt; chown deployer:deployer /home/deployer/tf1-flag.txt; chmod 600 /home/deployer/tf1-flag.txt
 install -d -m755 /opt/evilmirror
-cat > /opt/evilmirror/terraform-provider-null <<'SH'
+cat > /opt/evilmirror/terraform-provider-random <<'SH'
 #!/usr/bin/env bash
-# masquerades as the null provider; terraform execs it on plan -> we run first
+# masquerades as the random provider; terraform execs it on plan -> we run first
 cat /home/deployer/tf1-flag.txt > /tmp/tf1-proof 2>/dev/null
 exit 1
 SH
-chmod 755 /opt/evilmirror/terraform-provider-null
+chmod 755 /opt/evilmirror/terraform-provider-random
 cat > /home/deployer/.terraformrc <<'RC'
 disable_checkpoint = true
 provider_installation {
-  dev_overrides { \"registry.terraform.io/hashicorp/null\" = \"/opt/evilmirror\" }
+  dev_overrides { \"registry.terraform.io/hashicorp/random\" = \"/opt/evilmirror\" }
   direct {}
 }
 RC
@@ -368,6 +368,30 @@ sc_pbac_3(){
 
 # ========================= Secrets & identity pivots (SEC-*) ======================
 
+# ---- SEC-1: harvested CI deploy token -> reach the cluster -> read a secret -------------
+sc_sec_1(){
+  say "SEC-1 harvested CI deploy kubeconfig -> reach the cluster"
+  on "$HOST_K8S" "k3s kubectl -n alpha create sa ci-deploy --dry-run=client -o yaml | k3s kubectl apply -f - >/dev/null 2>&1
+k3s kubectl -n alpha create secret generic prod-db --from-literal=flag='$(flag sec_1-ci-kubeconfig-pivot)' --dry-run=client -o yaml | k3s kubectl apply -f - >/dev/null 2>&1
+cat <<'YML' | k3s kubectl apply -f - >/dev/null 2>&1
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: { name: ci-deploy-secrets, namespace: alpha }
+rules: [{ apiGroups: [''], resources: ['secrets'], verbs: ['get','list'] }]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: { name: ci-deploy-secrets, namespace: alpha }
+roleRef: { apiGroup: rbac.authorization.k8s.io, kind: Role, name: ci-deploy-secrets }
+subjects: [{ kind: ServiceAccount, name: ci-deploy, namespace: alpha }]
+YML"
+  # mint a long-lived deploy token and LEAK it on the shared runner (CI host)
+  local TOK; TOK=$(on "$HOST_K8S" "k3s kubectl -n alpha create token ci-deploy --duration=8760h 2>/dev/null")
+  on "$HOST_RUNNER" "install -d -m755 /opt/ci; printf '%s\n' '$TOK' > /opt/ci/deploy.token; chmod 644 /opt/ci/deploy.token"
+}
+
+
+
 # ---- SEC-2: Vault kubernetes-auth over-broad role (any pod SA -> another team's secret) --
 sc_sec_2(){
   say "SEC-2 Vault kubernetes-auth over-broad role"
@@ -386,6 +410,53 @@ rm -f /tmp/k8sca.crt"
 }
 
 # ========================= Supply chain (SUP-*) ===================================
+
+# ---- SUP-3: container image supply chain — poison :latest in the internal registry -----
+# gap: k3s trusts the internal registry over http and the deploy pulls :latest; poisoning that tag
+# runs attacker code in the consuming pod (which carries a secret).
+sc_sup_3(){
+  say "SUP-3 container image supply chain (poison :latest)"
+  command -v crane >/dev/null 2>&1 || curl -sL https://github.com/google/go-containerregistry/releases/download/v0.20.2/go-containerregistry_Linux_x86_64.tar.gz | tar xz -C /usr/local/bin crane 2>/dev/null
+  # k3s: trust the internal registry over http (the insecure-registry gap)
+  on "$HOST_K8S" "bash -s" <<'EOF'
+set -e
+cat > /etc/rancher/k3s/registries.yaml <<'YML'
+mirrors:
+  "registry:5000":
+    endpoint:
+      - "http://registry:5000"
+configs:
+  "registry:5000":
+    tls:
+      insecure_skip_verify: true
+YML
+systemctl restart k3s
+sleep 8
+EOF
+  # seed a BENIGN image + the deploy that consumes :latest with a secret mounted
+  crane copy nginx:1.27-alpine registry:5000/alpha/web:latest --insecure >/dev/null 2>&1 || true
+  on "$HOST_K8S" "k3s kubectl -n alpha create secret generic app-secret --from-literal=flag='$(flag sup_3-image-supply-chain)' --dry-run=client -o yaml | k3s kubectl apply -f - >/dev/null 2>&1
+cat <<'YML' | k3s kubectl apply -f - >/dev/null 2>&1
+apiVersion: apps/v1
+kind: Deployment
+metadata: { name: web, namespace: alpha }
+spec:
+  replicas: 1
+  selector: { matchLabels: { app: web } }
+  template:
+    metadata: { labels: { app: web } }
+    spec:
+      containers:
+        - name: web
+          image: registry:5000/alpha/web:latest
+          imagePullPolicy: Always
+          env:
+            - name: APP_SECRET
+              valueFrom: { secretKeyRef: { name: app-secret, key: flag } }
+YML"
+}
+
+
 
 # ---- SUP-1: 3rd-party CI action pinned by TAG (not SHA) -> re-tag attack -> RCE ---------
 sc_sup_1(){
